@@ -1,0 +1,104 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "ML Defender",
+  "projectDescription": "Enterprise-grade distributed network security system protecting critical infrastructure from DDoS and ransomware attacks",
+  "theme": "aspen",
+  "primaryColor": "#DC2626",
+  "lightColor": "#FEE2E2",
+  "darkColor": "#7F1D1D",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "introduction",
+              "architecture",
+              "philosophy"
+            ]
+          },
+          {
+            "group": "Getting Started",
+            "pages": [
+              "quickstart",
+              "installation",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Components",
+            "pages": [
+              "components/sniffer",
+              "components/ml-detector",
+              "components/firewall-agent",
+              "components/etcd-server",
+              "components/rag-system"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/deployment",
+              "operations/monitoring",
+              "operations/performance-tuning",
+              "operations/troubleshooting"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/threat-model",
+              "security/crypto-pipeline",
+              "security/limitations"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Development",
+        "groups": [
+          {
+            "group": "Contributing",
+            "pages": [
+              "dev/setup",
+              "dev/testing",
+              "dev/building"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/ebpf-xdp",
+              "advanced/ml-training",
+              "advanced/stress-testing"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "eBPF/XDP high-performance packet capture with 512-byte payload extraction",
+    "Multi-layer ransomware detection with entropy analysis and pattern matching",
+    "Embedded RandomForest ML models with 97.6% accuracy on CTU-13 dataset",
+    "ChaCha20-Poly1305 authenticated encryption with LZ4 compression",
+    "Autonomous kernel-level blocking via IPSet/IPTables integration",
+    "Distributed configuration management with etcd",
+    "RAG-based natural language intelligence with TinyLlama and FAISS",
+    "Production-validated: 36K events stress tested, 17-hour stability runs"
+  ],
+  "publicApiSurface": [
+    "sniffer-ebpf - Network traffic capture and feature extraction service",
+    "ml-detector - Machine learning threat detection service",
+    "firewall-acl-agent - Dynamic firewall rule management service",
+    "etcd-server - Distributed configuration and coordination service",
+    "rag-ingester - Log parsing and vector embedding service",
+    "rag - Natural language query interface for forensic analysis",
+    "synthetic_ml_output_injector - Testing tool for ML detector output simulation",
+    "ZMQ PUB/SUB endpoints - tcp://127.0.0.1:5571 (sniffer), tcp://127.0.0.1:5572 (ml-detector)",
+    "Configuration files - firewall.json, ml_detector.json, sniffer.json",
+    "Protobuf schema - NetworkSecurityEvent message format"
+  ]
+}
