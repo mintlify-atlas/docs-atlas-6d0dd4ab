@@ -1,80 +1,384 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: 'Quick Start'
+description: 'Get ML Defender running in 5 minutes with production-ready components'
+icon: 'rocket'
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
+ML Defender requires a Linux system with kernel 6.1.0+ for eBPF/XDP support.
 
-### Step 1: Set up your local environment
+### System Requirements
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- **OS**: Debian 12 (Bookworm) or Ubuntu 22.04+
+- **Kernel**: 6.1.0 or higher (for eBPF)
+- **RAM**: 8GB minimum (16GB recommended)
+- **CPU**: 4+ cores
+- **Network**: Dual-NIC recommended for gateway mode
 
-### Step 2: Deploy your changes
+### Install Dependencies
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+On Debian/Ubuntu, install all required packages:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential cmake git \
+    libzmq3-dev libprotobuf-dev protobuf-compiler \
+    libjsoncpp-dev libssl-dev liblz4-dev \
+    libgrpc++-dev libetcd-cpp-api-dev \
+    ipset iptables python3 python3-pip
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+# Kernel headers for eBPF
+sudo apt-get install -y linux-headers-$(uname -r)
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+For production deployments, see the [Installation Guide](/installation) for detailed dependency installation and optimization.
 </Note>
+
+---
+
+## Quick Start
+
+<Steps>
+  <Step title="Clone Repository">
+    Clone the ML Defender repository and navigate to the source directory:
+
+    ```bash
+    git clone https://github.com/yourusername/ml-defender.git
+    cd ml-defender
+    ```
+
+    Verify the repository structure:
+    ```bash
+    ls -l
+    # You should see: ml-detector/, firewall-acl-agent/, etcd-server/, sniffer/, tools/
+    ```
+  </Step>
+
+  <Step title="Build Components">
+    Build all ML Defender components using the build script:
+
+    ```bash
+    ./scripts/build_all.sh
+    ```
+
+    Or build components individually:
+
+    <CodeGroup>
+    ```bash Firewall Agent
+    cd firewall-acl-agent/build
+    cmake .. && make -j4
+    ```
+
+    ```bash ML Detector
+    cd ml-detector/build
+    cmake .. && make -j4
+    ```
+
+    ```bash eBPF Sniffer
+    cd sniffer
+    make
+    ```
+
+    ```bash etcd Server
+    cd etcd-server/build
+    cmake .. && make -j4
+    ```
+    </CodeGroup>
+
+    <Check>
+    Verify binaries were created:
+    ```bash
+    ls -lh firewall-acl-agent/build/firewall-acl-agent
+    ls -lh ml-detector/build/ml-detector
+    ls -lh sniffer/build/sniffer
+    ls -lh etcd-server/build/etcd_server
+    ```
+    </Check>
+  </Step>
+
+  <Step title="Start etcd Server">
+    Start the etcd server for distributed configuration and crypto key exchange:
+
+    ```bash Terminal 1
+    cd etcd-server/build
+    sudo ./etcd_server
+    ```
+
+    **Expected output:**
+    ```
+    [INFO] etcd server started on port 2379
+    [INFO] Heartbeat monitoring enabled (30s interval)
+    [INFO] Auto-restart enabled for managed services
+    ```
+
+    <Note>
+    The etcd server manages crypto seed exchange between ml-detector and firewall-agent using ChaCha20-Poly1305 encryption.
+    </Note>
+  </Step>
+
+  <Step title="Start Firewall Agent">
+    In a new terminal, start the firewall ACL agent:
+
+    ```bash Terminal 2
+    cd firewall-acl-agent/build
+    sudo ./firewall-acl-agent -c ../config/firewall.json
+    ```
+
+    **Expected output:**
+    ```
+    [INFO] IPSet ml_defender_blacklist_test created (max: 1000 IPs)
+    [INFO] IPTables chain ML_DEFENDER_TEST initialized
+    [INFO] ZMQ subscriber connected to tcp://localhost:5572
+    [INFO] ChaCha20-Poly1305 decryption enabled
+    [INFO] Ready to process ML detection events
+    ```
+  </Step>
+
+  <Step title="Verify System Status">
+    Check that all components are running and communicating:
+
+    <CodeGroup>
+    ```bash View Logs
+    tail -f /vagrant/logs/lab/firewall-agent.log
+    ```
+
+    ```bash Check IPSet
+    sudo ipset list ml_defender_blacklist_test
+    ```
+
+    ```bash Check IPTables
+    sudo iptables -L ML_DEFENDER_TEST -v -n
+    ```
+
+    ```bash Process Status
+    pgrep -a firewall-acl-agent
+    pgrep -a etcd_server
+    ```
+    </CodeGroup>
+
+    **Healthy system indicators:**
+    - ✅ etcd_server running on port 2379
+    - ✅ firewall-acl-agent connected to ZMQ
+    - ✅ IPSet created with 0 blocked IPs initially
+    - ✅ No crypto/decompression errors in logs
+  </Step>
+</Steps>
+
+---
+
+## Test with Synthetic Data
+
+Generate synthetic attack events to test the complete pipeline:
+
+### Build Synthetic Injector
+
+```bash
+cd tools/build
+cmake .. && make -j4
+```
+
+### Inject Attack Events
+
+Generate 1000 events at 50 events/second:
+
+```bash
+./synthetic_ml_output_injector 1000 50
+```
+
+**Parameters:**
+- `1000`: Total number of events to generate
+- `50`: Events per second rate
+
+### Monitor Blocking Activity
+
+<CodeGroup>
+```bash Watch IPSet Updates
+watch -n 1 'sudo ipset list ml_defender_blacklist_test | head -20'
+```
+
+```bash Monitor Metrics
+tail -f /vagrant/logs/lab/firewall-metrics.json | jq '.'
+```
+
+```bash Live Dashboard
+cd /vagrant && bash scripts/monitor_lab.sh
+```
+</CodeGroup>
+
+### Expected Results
+
+After injecting synthetic events:
+
+```
+IPSet Statistics:
+  - IPs blocked: 118 (initial batch)
+  - Crypto errors: 0
+  - Decompression errors: 0
+  - Parse errors: 0
+
+Performance:
+  - Throughput: 42-364 events/sec (tested)
+  - CPU usage: 41-54% (stress test)
+  - Memory: 127MB RSS (under load)
+```
+
+<Warning>
+IPSet has a capacity limit (default: 1000 IPs). When full, new IPs are queued. See [Configuration](/configuration#ipset-capacity) for tuning.
+</Warning>
+
+---
+
+## Verify Detection Pipeline
+
+Confirm the complete pipeline is operational:
+
+<Steps>
+  <Step title="Check Crypto Pipeline">
+    Verify encrypted communication is working:
+
+    ```bash
+    grep "crypto_errors" /vagrant/logs/lab/firewall-metrics.json
+    # Should show: "crypto_errors": 0
+    ```
+  </Step>
+
+  <Step title="Verify Blocking Actions">
+    Check that IPs are being added to IPSet:
+
+    ```bash
+    sudo ipset list ml_defender_blacklist_test -t
+    # Shows: Number of entries: <count>
+    ```
+  </Step>
+
+  <Step title="Test Actual Blocking">
+    Verify IPTables DROP rules are active:
+
+    ```bash
+    sudo iptables -L ML_DEFENDER_TEST -v -n --line-numbers
+    ```
+
+    Expected output:
+    ```
+    Chain ML_DEFENDER_TEST (1 references)
+    num   pkts bytes target     prot opt in     out     source               destination
+    1        0     0 DROP       all  --  *      *       0.0.0.0/0            0.0.0.0/0            match-set ml_defender_blacklist_test src
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Stop Services
+
+Gracefully shut down all components:
+
+```bash
+# Stop firewall agent
+sudo pkill -9 firewall-acl-agent
+
+# Stop etcd server
+sudo pkill -9 etcd_server
+
+# Clean up IPSet (optional)
+sudo ipset destroy ml_defender_blacklist_test
+
+# Clean up IPTables chain (optional)
+sudo iptables -F ML_DEFENDER_TEST
+sudo iptables -X ML_DEFENDER_TEST
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation Guide" icon="download" href="/installation">
+    Detailed installation for production environments, Docker, and Vagrant
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Configure components, tune performance, and customize detection thresholds
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Understand the ML pipeline, crypto transport, and eBPF packet capture
+  </Card>
+  <Card title="Gateway Mode" icon="network-wired" href="/deployment/gateway-mode">
+    Deploy dual-NIC gateway mode to protect entire networks
+  </Card>
+</CardGroup>
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="etcd server fails to start">
+    **Symptoms:** Port 2379 already in use
+
+    **Solution:**
+    ```bash
+    # Check what's using port 2379
+    sudo lsof -i :2379
+
+    # Kill existing etcd process
+    sudo pkill etcd
+
+    # Restart
+    cd etcd-server/build && sudo ./etcd_server
+    ```
+  </Accordion>
+
+  <Accordion title="Crypto errors in logs">
+    **Symptoms:** `crypto_errors > 0` in metrics
+
+    **Solution:**
+    1. Verify etcd is running and accessible
+    2. Check crypto token path in configs:
+       ```bash
+       grep "crypto_token_path" firewall-acl-agent/config/firewall.json
+       ```
+    3. Restart both ml-detector and firewall-agent to re-sync keys
+  </Accordion>
+
+  <Accordion title="IPSet capacity errors">
+    **Symptoms:** `ipset_failures` increasing rapidly
+
+    **Solution:**
+    Increase IPSet capacity in `firewall.json`:
+    ```json
+    "ipsets": {
+      "blacklist": {
+        "max_elements": 5000,  // Increase from 1000
+        "timeout": 3600
+      }
+    }
+    ```
+
+    Then destroy and recreate:
+    ```bash
+    sudo ipset destroy ml_defender_blacklist_test
+    # Restart firewall-acl-agent (auto-creates with new capacity)
+    ```
+  </Accordion>
+
+  <Accordion title="No events being processed">
+    **Symptoms:** Zero events in logs
+
+    **Checklist:**
+    1. ✅ etcd_server running?
+    2. ✅ firewall-acl-agent connected to ZMQ?
+    3. ✅ synthetic_ml_output_injector running?
+    4. ✅ Check ZMQ endpoint matches:
+       ```bash
+       grep endpoint firewall-acl-agent/config/firewall.json
+       # Should show: "endpoint": "tcp://localhost:5572"
+       ```
+  </Accordion>
+</AccordionGroup>
+
+<Check>
+**Success!** You now have ML Defender running with encrypted transport and autonomous blocking.
+</Check>

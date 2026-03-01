@@ -1,0 +1,587 @@
+---
+title: Monitoring and Observability
+description: Monitor ML Defender components, logs, metrics, and performance
+---
+
+ML Defender provides comprehensive monitoring capabilities through logs, metrics, IPSet statistics, and real-time dashboards. This guide covers log locations, monitoring commands, and observability tools.
+
+## Log Locations
+
+### Vagrant/Development
+
+All logs are centralized in `/vagrant/logs/lab/`:
+
+```bash
+/vagrant/logs/lab/
+├── firewall-agent.log      # Firewall ACL Agent
+├── firewall-metrics.json   # Firewall metrics export
+├── detector.log            # ML Detector
+├── sniffer.log             # eBPF Sniffer
+├── etcd-server.log         # etcd configuration server
+└── rag.log                 # RAG Security System
+```
+
+### Docker Compose
+
+```bash
+# View logs with docker-compose
+docker-compose logs -f service1      # Sniffer
+docker-compose logs -f service2      # Detector
+docker-compose logs --tail=100 etcd  # etcd
+
+# Logs are also written to bind-mounted volumes
+./logs/
+├── service1.log
+├── service2.log
+└── etcd.log
+```
+
+### Debian Package
+
+```bash
+# Systemd journal
+sudo journalctl -u sniffer-ebpf -f
+sudo journalctl -u sniffer-ebpf --since "10 minutes ago"
+
+# Application logs
+/var/log/ml-defender/
+├── sniffer.log
+├── detector.log
+└── firewall.log
+```
+
+## Monitoring Dashboard
+
+<Info>Use the built-in monitoring script for real-time visibility.</Info>
+
+### Live Monitoring Script
+
+The `monitor_lab.sh` script provides a comprehensive real-time dashboard:
+
+```bash
+# Start live monitoring (auto-refreshes every 3 seconds)
+cd /vagrant
+bash scripts/monitor_lab.sh
+
+# Or use alias (Vagrant)
+logs-lab
+```
+
+**Dashboard Output:**
+
+```
+╔════════════════════════════════════════════════════════════╗
+║  ML Defender Lab - Live Monitoring (Enhanced v2.3)         ║
+║  2026-02-08 14:32:45                                       ║
+║  System Uptime: 2 hours 15 minutes                         ║
+╚════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📈 System Statistics
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CPU: 42%
+RAM: 56%
+Disk: 38%
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 Component Status & Configuration
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔥 Firewall:  ✅ PID 12345 - CPU: 5.2% MEM: 1.8% (127MB) - Uptime: 2h 15m
+   Config: firewall.json
+
+🤖 Detector:  ✅ PID 12346 - CPU: 8.5% MEM: 3.2% (256MB) - Uptime: 2h 15m
+   Config: ml_detector_config.json
+
+📡 Sniffer:   ✅ PID 12347 - CPU: 12.1% MEM: 2.4% (189MB) - Uptime: 2h 14m
+  Profile: dual_nic_gateway
+  Interface: eth3
+
+🗄️  etcd-server: ✅ PID 12348 - CPU: 1.2% MEM: 0.8% (64MB) - Uptime: 2h 15m
+   Status: ✅ Healthy
+          Config: etcd.conf
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔌 Communication Channels
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Port 5571 (Sniffer → Detector): ✅ Listening (1 connections)
+Port 5572 (Detector → Firewall): ✅ Listening (1 connections)
+Port 2379 (etcd client): ✅ Listening (3 connections)
+Port 2380 (etcd peer): ✅ Listening (0 connections)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔥 IPSet Blacklist Status
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ml_defender_blacklist: ✅ Active - Entries: 42 - Memory: 2384B
+
+Recent blocked IPs:
+  • 192.168.1.100
+  • 10.0.0.50
+  • 172.16.1.200
+  • 203.0.113.45
+  • 198.51.100.123
+```
+
+### Dashboard Features
+
+The monitoring script shows:
+
+- **System Stats**: CPU, RAM, Disk usage
+- **Component Status**: Process health, PID, resource usage, uptime
+- **Configuration**: Active config files for each component
+- **Network Ports**: ZMQ socket status and connection counts
+- **IPSet Statistics**: Blacklist entries and memory usage
+- **Recent Activity**: Last 5 log lines per component
+- **Recent Blocks**: Last 5 blocked IPs
+- **Log Commands**: Quick commands to tail individual logs
+
+## Component Metrics
+
+### Sniffer Metrics
+
+```bash
+# View sniffer statistics
+grep "Enhanced RingBufferConsumer Statistics" /vagrant/logs/lab/sniffer.log -A 25 | tail -25
+```
+
+**Output:**
+
+```
+═══════════════════════════════════════════════════════════════════
+Enhanced RingBufferConsumer Statistics:
+═══════════════════════════════════════════════════════════════════
+Packets processed:         152,847
+Packets sent via ZMQ:      15,284 (batches)
+Batch size:                10 packets/batch
+Processing rate:           1,528 packets/sec
+Total runtime:             100.2 seconds
+
+Feature Groups Extracted:
+  - RandomForest:          152,847 packets (52 features)
+  - Ransomware:            152,847 packets (15 features)
+  - Internal Anomaly:      152,847 packets (8 features)
+  - DDoS Detection:        152,847 packets (8 features)
+
+eBPF Statistics:
+  - Kernel packets:        152,847
+  - Dropped packets:       0
+  - Ring buffer full:      0
+  - Poll timeouts:         12
+
+ZMQ Statistics:
+  - Messages sent:         15,284
+  - Send failures:         0
+  - Average batch size:    10.0 packets
+  - Compression ratio:     4.2x (LZ4)
+```
+
+### ML Detector Metrics
+
+```bash
+# View detector statistics
+grep "Stats:" /vagrant/logs/lab/detector.log | tail -10
+```
+
+**Output:**
+
+```
+Stats: Processed=15284 batches | DDoS=1247 | Ransomware=42 | Traffic=14891 | Internal=104 | Threats=1393
+Stats: Avg latency=0.8μs | Throughput=1528 pkt/s | Memory=256MB RSS | CPU=8.5%
+
+ML Detector Embedded Models:
+  Level 1 (DDoS):          Threshold=0.85 | Detections=1247 (8.2%)
+  Level 2 (Ransomware):    Threshold=0.90 | Detections=42 (0.3%)
+  Level 3 (Traffic):       Threshold=0.80 | Detections=14891 (97.4%)
+  Level 4 (Internal):      Threshold=0.85 | Detections=104 (0.7%)
+
+Crypto Pipeline:
+  - Encryption:            15284 messages
+  - Failures:              0 (0.0%)
+  - Avg encrypt time:      12.4μs
+
+Compression Pipeline:
+  - Compression:           15284 messages
+  - Avg ratio:             4.2x
+  - Avg compress time:     8.7μs
+```
+
+### Firewall ACL Agent Metrics
+
+```bash
+# View firewall statistics
+grep -E "Stats|Metrics" /vagrant/logs/lab/firewall-agent.log | tail -20
+
+# Or view JSON metrics export
+cat /vagrant/logs/lab/firewall-metrics.json | jq
+```
+
+**Output:**
+
+```json
+{
+  "timestamp": "2026-02-08T14:32:45Z",
+  "component": "firewall-acl-agent",
+  "version": "1.2.1",
+  "uptime_seconds": 8100,
+  "zmq": {
+    "messages_received": 1393,
+    "messages_processed": 1393,
+    "messages_failed": 0,
+    "avg_message_size_bytes": 1247,
+    "connection_status": "connected"
+  },
+  "crypto": {
+    "decryption_operations": 1393,
+    "decryption_failures": 0,
+    "avg_decryption_time_us": 15.2,
+    "total_decryption_time_ms": 21187
+  },
+  "compression": {
+    "decompression_operations": 1393,
+    "decompression_failures": 0,
+    "avg_decompression_time_us": 11.8,
+    "total_decompressed_bytes": 1737851
+  },
+  "ipset": {
+    "add_operations": 1393,
+    "add_successes": 1393,
+    "add_failures": 0,
+    "current_entries": 1042,
+    "max_capacity": 1000,
+    "memory_usage_bytes": 52416
+  },
+  "performance": {
+    "avg_processing_time_ms": 2.4,
+    "max_queue_depth": 12,
+    "cpu_percent": 5.2,
+    "memory_rss_mb": 127
+  }
+}
+```
+
+## IPSet Monitoring
+
+### View IPSet Contents
+
+```bash
+# List all IPSets
+sudo ipset list -n
+
+# View specific IPSet details
+sudo ipset list ml_defender_blacklist_test
+
+# View IPSet with statistics
+sudo ipset list ml_defender_blacklist_test -t
+
+# Count entries
+sudo ipset list ml_defender_blacklist_test | grep -c "^[0-9]"
+
+# View recent entries (last 10)
+sudo ipset list ml_defender_blacklist_test | grep "^[0-9]" | tail -10
+```
+
+### Monitor IPSet Changes
+
+```bash
+# Watch IPSet in real-time (updates every 1 second)
+watch -n 1 'sudo ipset list ml_defender_blacklist_test | head -20'
+
+# Monitor entry count
+watch -n 1 'echo "Blacklist entries: $(sudo ipset list ml_defender_blacklist_test | grep -c "^[0-9]")"'
+```
+
+### IPSet Statistics
+
+```bash
+# Get IPSet statistics
+sudo ipset list ml_defender_blacklist_test -t
+
+# Output:
+Name: ml_defender_blacklist_test
+Type: hash:ip
+Revision: 4
+Header: family inet hashsize 1024 maxelem 1000 timeout 3600
+Size in memory: 52416
+References: 1
+Number of entries: 1042
+Members:
+192.168.1.100 timeout 3456
+10.0.0.50 timeout 3289
+...
+```
+
+## ZeroMQ Traffic Monitoring
+
+### Port Status
+
+```bash
+# Check ZMQ ports are listening
+ss -tlnp | grep -E "(5571|5572|2379|2380)"
+
+# Check established connections
+ss -tnp | grep -E "(5571|5572)" | grep ESTAB
+
+# Monitor connection count
+watch -n 1 'ss -tnp | grep 5572 | grep ESTAB | wc -l'
+```
+
+### Message Flow
+
+```bash
+# Monitor sniffer sending to detector
+grep "Sent batch" /vagrant/logs/lab/sniffer.log | tail -10
+
+# Monitor detector receiving from sniffer
+grep "Received batch" /vagrant/logs/lab/detector.log | tail -10
+
+# Monitor detector sending to firewall
+grep "Published threat" /vagrant/logs/lab/detector.log | tail -10
+
+# Monitor firewall receiving from detector
+grep "Received message" /vagrant/logs/lab/firewall-agent.log | tail -10
+```
+
+### ZMQ Performance
+
+```bash
+# Calculate message rate (sniffer → detector)
+grep "Sent batch" /vagrant/logs/lab/sniffer.log | tail -1000 | \
+  awk '{print $1, $2}' | uniq -c | awk '{sum+=$1} END {print sum/NR " batches/sec"}'
+
+# Calculate throughput (detector → firewall)
+grep "Published threat" /vagrant/logs/lab/detector.log | tail -1000 | \
+  awk '{print $1, $2}' | uniq -c | awk '{sum+=$1} END {print sum/NR " threats/sec"}'
+```
+
+## Real Monitoring Scripts
+
+ML Defender includes production-ready monitoring scripts:
+
+### monitor_lab.sh
+
+Comprehensive dashboard (covered above):
+
+```bash source/scripts/monitor_lab.sh
+#!/bin/bash
+# ML Defender - Lab Monitoring Script (Enhanced v2.3)
+# Shows: CPU, RAM, ZMQ ports, IPSet stats, config files, uptime, logs
+
+PROJECT_ROOT="/vagrant"
+LOG_DIR="$PROJECT_ROOT/logs/lab"
+
+# Main monitoring loop
+while true; do
+  TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+  SYSTEM_UPTIME=$(uptime -p | sed 's/up //')
+
+  # Display header
+  clear
+  echo "╔════════════════════════════════════════════════════════════╗"
+  echo "║  ML Defender Lab - Live Monitoring (Enhanced v2.3)         ║"
+  echo "║  $TIMESTAMP                                ║"
+  echo "║  System Uptime: $SYSTEM_UPTIME                            "
+  echo "╚════════════════════════════════════════════════════════════╝"
+
+  # Show system stats, component status, ports, IPSet, logs
+  # ... (full script in source)
+
+  sleep 3
+done
+```
+
+### monitor_stability.sh
+
+Long-term stability monitoring:
+
+```bash
+# Monitor stability over extended period
+bash scripts/monitor_stability.sh
+
+# Output:
+Timestamp,Sniffer_PID,Detector_PID,Firewall_PID,Sniffer_CPU,Detector_CPU,Firewall_CPU,Sniffer_MEM,Detector_MEM,Firewall_MEM
+2026-02-08 14:00:00,12347,12346,12345,12.1,8.5,5.2,189,256,127
+2026-02-08 14:05:00,12347,12346,12345,11.8,8.7,5.1,189,257,127
+...
+```
+
+### monitor_stress.sh
+
+Stress test monitoring:
+
+```bash
+# Monitor during stress test
+bash monitor_stress.sh <sniffer_pid> <detector_pid> <output_dir> <interval>
+
+# Output files:
+# - cpu.csv: CPU usage over time
+# - memory.csv: Memory usage over time
+# - performance.csv: Processing rates
+```
+
+## Log Analysis
+
+### Search for Errors
+
+```bash
+# Search all logs for errors
+grep -i "error" /vagrant/logs/lab/*.log
+
+# Search for warnings
+grep -i "warning" /vagrant/logs/lab/*.log
+
+# Search for failures
+grep -i "failed" /vagrant/logs/lab/*.log
+```
+
+### Analyze Detection Patterns
+
+```bash
+# Count detections by type
+grep "Detection:" /vagrant/logs/lab/detector.log | \
+  awk '{print $4}' | sort | uniq -c
+
+# Output:
+   1247 DDoS
+     42 Ransomware
+  14891 Traffic
+    104 Internal
+
+# View high-confidence threats
+grep "Detection:" /vagrant/logs/lab/detector.log | \
+  awk '$6 > 0.95' | tail -20
+```
+
+### Analyze Blocked IPs
+
+```bash
+# Extract all blocked IPs from firewall log
+grep "Blocked IP" /vagrant/logs/lab/firewall-agent.log | \
+  awk '{print $5}' | sort | uniq -c | sort -rn
+
+# Output:
+     42 192.168.1.100
+     28 10.0.0.50
+     15 172.16.1.200
+      8 203.0.113.45
+      3 198.51.100.123
+
+# Check if specific IP was blocked
+grep "192.168.1.100" /vagrant/logs/lab/firewall-agent.log
+```
+
+### Performance Analysis
+
+```bash
+# Extract processing times
+grep "Processing time" /vagrant/logs/lab/detector.log | \
+  awk '{print $NF}' | sed 's/ms//' | \
+  awk '{sum+=$1; count+=1} END {print "Avg: " sum/count " ms"}'
+
+# Extract throughput over time
+grep "Throughput" /vagrant/logs/lab/detector.log | \
+  awk '{print $1, $2, $NF}'
+```
+
+## Dashboard and Alerting (Roadmap)
+
+<Warning>These features are planned for future releases.</Warning>
+
+### Prometheus Integration (Planned)
+
+```yaml
+# Future: Prometheus metrics exporter
+metrics:
+  prometheus:
+    enabled: true
+    port: 9090
+    path: /metrics
+    interval_seconds: 15
+```
+
+### Grafana Dashboards (Planned)
+
+- Real-time component health
+- Detection rate trends
+- IPSet capacity utilization
+- ZMQ message flow
+- CPU/Memory usage graphs
+- Threat heatmaps
+
+### Alerting Rules (Planned)
+
+```yaml
+# Future: Alerting configuration
+alerts:
+  - name: high_cpu
+    condition: cpu_percent > 80
+    duration: 5m
+    action: email
+
+  - name: ipset_capacity
+    condition: ipset_entries > 900
+    threshold: 90%
+    action: slack
+
+  - name: component_down
+    condition: process_status == stopped
+    duration: 1m
+    action: pagerduty
+```
+
+## Quick Reference
+
+### Monitoring Commands
+
+```bash
+# Live dashboard
+bash scripts/monitor_lab.sh
+
+# Component status
+pgrep -a firewall-acl-agent
+pgrep -a ml-detector
+pgrep -a sniffer
+
+# IPSet monitoring
+sudo ipset list ml_defender_blacklist_test
+watch -n 1 'sudo ipset list ml_defender_blacklist_test | head -20'
+
+# Log monitoring
+tail -f /vagrant/logs/lab/firewall-agent.log
+tail -f /vagrant/logs/lab/detector.log
+tail -f /vagrant/logs/lab/sniffer.log
+
+# Port monitoring
+ss -tlnp | grep -E "(5571|5572)"
+
+# Performance monitoring
+top -b -n 1 | grep -E "(sniffer|ml-detector|firewall)"
+```
+
+### Vagrant Aliases
+
+```bash
+# Component logs
+logs-firewall    # tail -f firewall.log
+logs-detector    # tail -f detector.log
+logs-sniffer     # tail -f sniffer.log
+logs-lab         # Live monitoring dashboard
+
+# Component status
+status-lab       # pgrep all components
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Performance Tuning" icon="gauge-high" href="/operations/performance-tuning">
+    Optimize component performance
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Diagnose and fix issues
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration/firewall">
+    Configure monitoring settings
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/components">
+    Understand component interactions
+  </Card>
+</CardGroup>

@@ -1,0 +1,863 @@
+---
+title: Troubleshooting
+description: Diagnose and resolve common issues with ML Defender
+---
+
+This guide covers common issues, diagnostic procedures, and recovery strategies for ML Defender components. Use the accordion sections below for FAQ-style troubleshooting.
+
+## Quick Diagnostics
+
+### Health Check Script
+
+Run the built-in diagnostics:
+
+```bash
+# Full system diagnostics
+cd /vagrant
+bash scripts/debug.sh
+
+# Network diagnostics
+bash scripts/network_diagnostics.sh
+```
+
+**Output includes:**
+- File existence checks
+- Docker information
+- Running containers/processes
+- Network interfaces and routing
+- eBPF support
+- Recent logs
+
+### Component Status
+
+```bash
+# Check all components
+pgrep -a firewall-acl-agent  # Should show PID and command
+pgrep -a ml-detector         # Should show PID and command
+pgrep -a sniffer             # Should show PID and command
+pgrep -a etcd-server         # Should show PID and command
+
+# Or use alias (Vagrant)
+status-lab
+```
+
+### Log Quick Check
+
+```bash
+# Check for errors in all logs
+grep -i "error" /vagrant/logs/lab/*.log | tail -20
+
+# Check for warnings
+grep -i "warning" /vagrant/logs/lab/*.log | tail -20
+
+# Check for crashes
+grep -i "segfault\|abort\|fatal" /vagrant/logs/lab/*.log
+```
+
+## Common Issues
+
+<Accordion title="Component Won't Start">
+  ### Symptoms
+  - Process exits immediately after launch
+  - "Address already in use" errors
+  - "Permission denied" errors
+
+  ### Diagnostics
+
+  ```bash
+  # Check if port is already bound
+  ss -tlnp | grep -E "(5571|5572|2379)"
+
+  # Check for previous processes
+  pgrep -a sniffer
+  pgrep -a ml-detector
+  pgrep -a firewall-acl-agent
+
+  # Check permissions
+  ls -l /vagrant/sniffer/build/sniffer
+  ls -l /vagrant/ml-detector/build/ml-detector
+  ls -l /vagrant/firewall-acl-agent/build/firewall-acl-agent
+
+  # Check capabilities (for sniffer/firewall)
+  getcap /vagrant/sniffer/build/sniffer
+  ```
+
+  ### Solutions
+
+  **Port Already in Use:**
+  ```bash
+  # Kill existing processes
+  sudo pkill -9 sniffer
+  pkill -9 ml-detector
+  sudo pkill -9 firewall-acl-agent
+
+  # Or use alias
+  kill-lab
+
+  # Wait a few seconds
+  sleep 3
+
+  # Restart
+  run-lab
+  ```
+
+  **Permission Denied (Sniffer/Firewall):**
+  ```bash
+  # These components require root for eBPF/IPSet
+  sudo ./sniffer -c config/sniffer.json
+  sudo ./firewall-acl-agent -c config/firewall.json
+
+  # Or add capabilities (not recommended for development)
+  sudo setcap cap_net_raw,cap_net_admin,cap_bpf+eip ./sniffer
+  ```
+
+  **Binary Not Found:**
+  ```bash
+  # Rebuild component
+  cd /vagrant/sniffer
+  make clean && make
+
+  cd /vagrant/ml-detector/build
+  rm -rf * && cmake .. && make -j4
+
+  cd /vagrant/firewall-acl-agent/build
+  rm -rf * && cmake .. && make -j4
+  ```
+
+  **Config File Missing:**
+  ```bash
+  # Check config exists
+  ls -l /vagrant/sniffer/config/sniffer.json
+  ls -l /vagrant/ml-detector/config/ml_detector_config.json
+  ls -l /vagrant/firewall-acl-agent/config/firewall.json
+
+  # Validate JSON syntax
+  jq . /vagrant/firewall-acl-agent/config/firewall.json
+  ```
+</Accordion>
+
+<Accordion title="No Packets Being Captured">
+  ### Symptoms
+  - Sniffer shows "Packets processed: 0"
+  - Detector receives no data
+  - No traffic in logs
+
+  ### Diagnostics
+
+  ```bash
+  # Check interface is up
+  ip link show eth1
+  ip link show eth3
+
+  # Check promiscuous mode
+  ip link show eth1 | grep PROMISC
+  ip link show eth3 | grep PROMISC
+
+  # Test packet capture manually
+  sudo tcpdump -i eth1 -c 10
+
+  # Check eBPF program is loaded
+  sudo bpftool prog list | grep sniffer
+
+  # Check sniffer config
+  grep capture_interface /vagrant/sniffer/config/sniffer.json
+  ```
+
+  ### Solutions
+
+  **Interface Not in Promiscuous Mode:**
+  ```bash
+  # Enable promiscuous mode
+  sudo ip link set eth1 promisc on
+  sudo ip link set eth3 promisc on
+
+  # Verify
+  ip link show eth1 | grep PROMISC
+  ```
+
+  **Wrong Interface Configured:**
+  ```bash
+  # List available interfaces
+  ip -4 addr show | grep -E "^[0-9]+:|inet "
+
+  # Edit sniffer config
+  vim /vagrant/sniffer/config/sniffer.json
+  # Update "capture_interface": "eth1" (or correct interface)
+
+  # Restart sniffer
+  sudo pkill -9 sniffer
+  sudo ./sniffer -c config/sniffer.json
+  ```
+
+  **No Traffic on Interface:**
+  ```bash
+  # Generate test traffic
+  ping 8.8.8.8 -c 10
+
+  # Or from another terminal
+  curl -I https://example.com
+
+  # Check sniffer captures it
+  grep "Paquetes procesados" /vagrant/logs/lab/sniffer.log | tail -5
+  ```
+
+  **eBPF Program Not Loaded:**
+  ```bash
+  # Check kernel version (need 5.10+)
+  uname -r
+
+  # Check eBPF support
+  grep CONFIG_BPF /boot/config-$(uname -r)
+
+  # Rebuild eBPF program
+  cd /vagrant/sniffer
+  make clean && make
+
+  # Check for compilation errors
+  tail -50 /vagrant/logs/lab/sniffer.log
+  ```
+</Accordion>
+
+<Accordion title="Components Not Communicating">
+  ### Symptoms
+  - Sniffer captures packets but detector shows no input
+  - Detector detects threats but firewall receives nothing
+  - "Connection refused" or "timeout" errors
+
+  ### Diagnostics
+
+  ```bash
+  # Check ZMQ ports
+  ss -tlnp | grep 5571  # Detector listening
+  ss -tlnp | grep 5572  # Firewall listening
+
+  # Check connections
+  ss -tnp | grep 5571 | grep ESTAB
+  ss -tnp | grep 5572 | grep ESTAB
+
+  # Check firewall rules (not iptables, network firewall)
+  sudo iptables -L -n | grep -E "(5571|5572)"
+
+  # Check logs for ZMQ errors
+  grep -i "zmq\|socket\|connect" /vagrant/logs/lab/*.log | tail -20
+  ```
+
+  ### Solutions
+
+  **Wrong Startup Order:**
+  ```bash
+  # Components must start in order:
+  # 1. Firewall (SUB - binds :5572)
+  # 2. Detector (PUB - connects to :5572, binds :5571)
+  # 3. Sniffer (PUSH - connects to :5571)
+
+  # Restart in correct order
+  kill-lab
+  sleep 3
+
+  # Start firewall first
+  cd /vagrant/firewall-acl-agent/build
+  sudo ./firewall-acl-agent -c ../config/firewall.json &
+  sleep 3
+
+  # Then detector
+  cd /vagrant/ml-detector/build
+  ./ml-detector -c ../config/ml_detector_config.json &
+  sleep 2
+
+  # Finally sniffer
+  cd /vagrant/sniffer/build
+  sudo ./sniffer -c ../config/sniffer.json &
+  ```
+
+  **Port Already Bound:**
+  ```bash
+  # Find process using port
+  sudo lsof -i :5571
+  sudo lsof -i :5572
+
+  # Kill it
+  sudo kill -9 <PID>
+
+  # Restart components
+  run-lab
+  ```
+
+  **Endpoint Mismatch:**
+  ```bash
+  # Check detector config (should bind :5571)
+  grep zmq_endpoint /vagrant/ml-detector/config/ml_detector_config.json
+  # Should be: "tcp://127.0.0.1:5571" or "tcp://0.0.0.0:5571"
+
+  # Check sniffer config (should connect to :5571)
+  grep zmq_endpoint /vagrant/sniffer/config/sniffer.json
+  # Should be: "tcp://127.0.0.1:5571"
+
+  # Check firewall config (should bind :5572)
+  grep endpoint /vagrant/firewall-acl-agent/config/firewall.json
+  # Should be: "tcp://localhost:5572"
+
+  # Check detector config (should connect to :5572)
+  grep output_zmq /vagrant/ml-detector/config/ml_detector_config.json
+  # Should be: "tcp://0.0.0.0:5572"
+  ```
+</Accordion>
+
+<Accordion title="IPSet Issues">
+  ### Symptoms
+  - "IPSet not found" errors
+  - "IPSet add failed" errors
+  - Capacity warnings
+  - IPs not being blocked
+
+  ### Diagnostics
+
+  ```bash
+  # Check IPSet exists
+  sudo ipset list -n | grep ml_defender
+
+  # Check IPSet details
+  sudo ipset list ml_defender_blacklist_test
+
+  # Check capacity
+  ENTRIES=$(sudo ipset list ml_defender_blacklist_test | grep -c "^[0-9]")
+  echo "Entries: $ENTRIES"
+
+  # Check iptables rule
+  sudo iptables -L ML_DEFENDER_TEST -n -v
+  ```
+
+  ### Solutions
+
+  **IPSet Doesn't Exist:**
+  ```bash
+  # Create manually
+  sudo ipset create ml_defender_blacklist_test hash:ip \
+    family inet hashsize 1024 maxelem 1000 timeout 3600
+
+  # Or let firewall create it (set create_if_missing: true)
+  vim /vagrant/firewall-acl-agent/config/firewall.json
+  # "create_if_missing": true
+
+  # Restart firewall
+  sudo pkill -9 firewall-acl-agent
+  cd /vagrant/firewall-acl-agent/build
+  sudo ./firewall-acl-agent -c ../config/firewall.json
+  ```
+
+  **IPSet Full (Capacity Limit):**
+  ```bash
+  # Check capacity
+  sudo ipset list ml_defender_blacklist_test | grep maxelem
+  # maxelem 1000 means max 1000 IPs
+
+  # Option 1: Increase capacity (requires recreate)
+  sudo ipset destroy ml_defender_blacklist_test
+  sudo ipset create ml_defender_blacklist_test hash:ip \
+    family inet hashsize 4096 maxelem 10000 timeout 3600
+
+  # Option 2: Flush existing entries
+  sudo ipset flush ml_defender_blacklist_test
+
+  # Option 3: Update config (restart required)
+  vim /vagrant/firewall-acl-agent/config/firewall.json
+  # "max_elements": 10000,
+  # "hash_size": 4096
+  ```
+
+  **IPs Not Being Blocked:**
+  ```bash
+  # Check IP is in IPSet
+  sudo ipset test ml_defender_blacklist_test 192.168.1.100
+
+  # Check iptables rule exists
+  sudo iptables -L ML_DEFENDER_TEST -n -v | grep ml_defender_blacklist_test
+
+  # If rule missing, add it
+  sudo iptables -A ML_DEFENDER_TEST -m set --match-set ml_defender_blacklist_test src -j DROP
+
+  # Check rule is in INPUT chain
+  sudo iptables -L INPUT -n -v | grep ML_DEFENDER_TEST
+
+  # If not, insert it
+  sudo iptables -I INPUT -j ML_DEFENDER_TEST
+  ```
+
+  **Permission Denied:**
+  ```bash
+  # IPSet requires root
+  sudo ipset list
+
+  # Firewall must run as root
+  sudo ./firewall-acl-agent -c config/firewall.json
+
+  # Check sudoers file
+  sudo cat /etc/sudoers.d/ml-defender
+  # Should allow vagrant user to run ipset/iptables
+  ```
+</Accordion>
+
+<Accordion title="Crypto/Compression Errors">
+  ### Symptoms
+  - "Decryption failed" errors
+  - "Decompression failed" errors
+  - "crypto_errors" > 0 in metrics
+  - Firewall receives garbled data
+
+  ### Diagnostics
+
+  ```bash
+  # Check crypto metrics
+  cat /vagrant/logs/lab/firewall-metrics.json | jq '.crypto, .compression'
+
+  # Check for crypto errors in logs
+  grep -i "decrypt\|encrypt\|crypto\|compression" /vagrant/logs/lab/*.log | grep -i error
+
+  # Check etcd connection
+  curl -s http://localhost:2379/version
+
+  # Check crypto tokens in etcd
+  etcdctl get /crypto/firewall/tokens --prefix
+  ```
+
+  ### Solutions
+
+  **etcd Not Running:**
+  ```bash
+  # Check etcd status
+  pgrep -a etcd-server
+
+  # Start etcd
+  cd /vagrant/etcd-server/build
+  ./etcd_server &
+
+  # Or use Docker
+  docker-compose up -d etcd
+  ```
+
+  **Crypto Tokens Not Shared:**
+  ```bash
+  # Check ml-detector registered token
+  etcdctl get /crypto/detector/tokens --prefix
+
+  # Check firewall can read token
+  etcdctl get /crypto/firewall/tokens --prefix
+
+  # If missing, restart ml-detector (it publishes token)
+  pkill -9 ml-detector
+  cd /vagrant/ml-detector/build
+  ./ml-detector -c ../config/ml_detector_config.json
+
+  # Wait for token publication (check logs)
+  grep "Published crypto token" /vagrant/logs/lab/detector.log
+  ```
+
+  **Crypto Disabled in Config:**
+  ```bash
+  # Check detector config
+  grep -A 5 '"encryption"' /vagrant/ml-detector/config/ml_detector_config.json
+  # "enabled": true
+
+  # Check firewall config
+  grep -A 5 '"encryption"' /vagrant/firewall-acl-agent/config/firewall.json
+  # "enabled": true
+
+  # If disabled, enable and restart
+  ```
+
+  **Key Mismatch:**
+  ```bash
+  # Delete all crypto tokens and restart
+  etcdctl del /crypto --prefix
+
+  # Restart detector (publishes new token)
+  pkill -9 ml-detector
+  ./ml-detector -c config/ml_detector_config.json &
+
+  # Restart firewall (reads new token)
+  sudo pkill -9 firewall-acl-agent
+  sudo ./firewall-acl-agent -c config/firewall.json &
+  ```
+</Accordion>
+
+<Accordion title="High CPU/Memory Usage">
+  ### Symptoms
+  - Component using >80% CPU
+  - Memory growing continuously
+  - System becomes unresponsive
+  - Out of memory errors
+
+  ### Diagnostics
+
+  ```bash
+  # Monitor CPU and memory
+  top -b -n 1 | grep -E "(sniffer|ml-detector|firewall)"
+
+  # Detailed process stats
+  ps aux | grep -E "(sniffer|ml-detector|firewall)" | \
+    awk '{print $2, $3, $4, $5, $6/1024 "MB", $11}'
+
+  # Check for memory leaks
+  # Run for several hours, plot RSS over time
+  while true; do
+    ps aux | grep ml-detector | awk '{print $6/1024}' >> mem.txt
+    sleep 300
+  done
+
+  # Check queue depths
+  grep "queue_depth" /vagrant/logs/lab/*.log | tail -20
+  ```
+
+  ### Solutions
+
+  **High CPU - Sniffer:**
+  ```bash
+  # Reduce batch frequency
+  vim /vagrant/sniffer/config/sniffer.json
+  # Increase "batch_timeout_ms": 200 (from 100)
+  # Increase "batch_size": 20 (from 10)
+
+  # Disable unused feature groups
+  # "extract_traffic_features": false
+
+  # Reduce compression level
+  # "compression_level": 1 (fastest)
+  ```
+
+  **High CPU - Detector:**
+  ```bash
+  # Disable unused models
+  vim /vagrant/ml-detector/config/ml_detector_config.json
+  # Set "enabled": false for unused models
+
+  # Increase batch size (reduces inference calls)
+  # "batch_size": 200 (from 100)
+
+  # Increase thresholds (fewer detections)
+  # "ddos_threshold": 0.90 (from 0.85)
+  ```
+
+  **High CPU - Firewall:**
+  ```bash
+  # Enable batching
+  vim /vagrant/firewall-acl-agent/config/firewall.json
+  # "enable_batching": true
+  # "batch_size_threshold": 20
+  # "batch_time_threshold_ms": 2000
+  ```
+
+  **Memory Leak:**
+  ```bash
+  # Check for memory growth
+  grep -i "memory\|leak" /vagrant/logs/lab/*.log
+
+  # Restart component periodically (workaround)
+  # Add to cron:
+  0 */4 * * * /vagrant/scripts/restart_components.sh
+
+  # Report issue with memory profile
+  # Use valgrind (slow, for development only)
+  valgrind --leak-check=full --log-file=valgrind.log \
+    ./ml-detector -c config/ml_detector_config.json
+  ```
+
+  **Out of Memory:**
+  ```bash
+  # Check available memory
+  free -h
+
+  # Kill memory-hungry processes
+  kill-lab
+
+  # Restart with memory limits
+  systemd-run --scope -p MemoryMax=512M sudo ./sniffer -c config/sniffer.json &
+  systemd-run --scope -p MemoryMax=1G ./ml-detector -c config/ml_detector_config.json &
+  systemd-run --scope -p MemoryMax=256M sudo ./firewall-acl-agent -c config/firewall.json &
+  ```
+</Accordion>
+
+<Accordion title="Gateway Mode Not Working">
+  ### Symptoms
+  - Client VM cannot reach internet through defender
+  - Packets not being forwarded
+  - "Network unreachable" errors on client
+
+  ### Diagnostics
+
+  ```bash
+  # On defender VM:
+
+  # Check IP forwarding
+  sysctl net.ipv4.ip_forward
+  # Should be: net.ipv4.ip_forward = 1
+
+  # Check routing
+  ip route show
+  # Should have default route via eth1
+
+  # Check NAT rules
+  sudo iptables -t nat -L POSTROUTING -n -v
+  # Should have MASQUERADE rule for eth1
+
+  # Check interfaces
+  ip addr show eth1
+  ip addr show eth3
+  # eth1: 192.168.56.20
+  # eth3: 192.168.100.1
+
+  # On client VM:
+
+  # Check default route
+  ip route show
+  # Should be: default via 192.168.100.1
+
+  # Test connectivity to gateway
+  ping -c 3 192.168.100.1
+
+  # Test internet (through gateway)
+  ping -c 3 8.8.8.8
+  ```
+
+  ### Solutions
+
+  **IP Forwarding Disabled:**
+  ```bash
+  # Enable IP forwarding
+  sudo sysctl -w net.ipv4.ip_forward=1
+  sudo sysctl -w net.ipv6.conf.all.forwarding=1
+
+  # Make permanent
+  echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+
+  # Verify
+  sysctl net.ipv4.ip_forward
+  ```
+
+  **NAT Not Configured:**
+  ```bash
+  # Add NAT rule
+  sudo iptables -t nat -A POSTROUTING -o eth1 -j MASQUERADE
+
+  # Add FORWARD rules
+  sudo iptables -A FORWARD -i eth3 -o eth1 -j ACCEPT
+  sudo iptables -A FORWARD -i eth1 -o eth3 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+  # Verify
+  sudo iptables -t nat -L POSTROUTING -n -v
+  ```
+
+  **rp_filter Blocking Traffic:**
+  ```bash
+  # Disable reverse path filtering (Qwen edge case)
+  sudo sysctl -w net.ipv4.conf.all.rp_filter=0
+  sudo sysctl -w net.ipv4.conf.eth1.rp_filter=0
+  sudo sysctl -w net.ipv4.conf.eth3.rp_filter=0
+
+  # Make permanent
+  sudo tee -a /etc/sysctl.conf <<EOF
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.eth1.rp_filter=0
+net.ipv4.conf.eth3.rp_filter=0
+EOF
+  ```
+
+  **Client Route Incorrect:**
+  ```bash
+  # On client VM:
+
+  # Delete existing default route
+  sudo ip route del default
+
+  # Add correct default route
+  sudo ip route add default via 192.168.100.1 dev eth1
+
+  # Verify
+  ip route show
+  ping 192.168.100.1
+  ping 8.8.8.8
+  ```
+</Accordion>
+
+## Debug Scripts
+
+### debug.sh
+
+Comprehensive system diagnostics:
+
+```bash source/scripts/debug.sh
+#!/bin/bash
+# Script de debug para troubleshooting del proyecto ZeroMQ + Protobuf
+
+echo "🔍 ZeroMQ + Protobuf Debug Information"
+echo "====================================="
+
+# Verificar archivos necesarios
+echo "📁 Checking required files..."
+files_to_check=(
+    "protobuf/network_security.proto"
+    "docker-compose.yml"
+    "service1/main.cpp"
+    "service2/main.cpp"
+)
+
+for file in "${files_to_check[@]}"; do
+    if [[ -f "$file" ]]; then
+        echo "   ✅ $file"
+    else
+        echo "   ❌ $file (MISSING)"
+    fi
+done
+
+echo ""
+echo "🐳 Docker information..."
+docker --version
+docker-compose --version
+
+echo ""
+echo "🏃 Running containers:"
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+echo ""
+echo "🔧 Recent Docker logs:"
+docker-compose logs --tail=20 service1
+docker-compose logs --tail=20 service2
+
+# ... (see full script in source)
+```
+
+### network_diagnostics.sh
+
+Network-specific diagnostics:
+
+```bash source/scripts/network_diagnostics.sh
+#!/bin/bash
+set -e
+
+echo "=== DIAGNÓSTICO DE RED - ZeroMQ Lab ==="
+echo ""
+
+echo "1. INTERFACES DE RED"
+ip -4 addr show | grep -E "^[0-9]+:|inet "
+
+echo ""
+echo "2. TABLA DE RUTAS"
+ip route
+
+echo ""
+echo "3. IPs CONFIGURADAS"
+echo "  NAT (eth0):             $(ip -4 addr show eth0 | grep inet | awk '{print $2}' | cut -d'/' -f1)"
+echo "  Private Network (eth1): $(ip -4 addr show eth1 | grep inet | awk '{print $2}' | cut -d'/' -f1)"
+
+echo ""
+echo "4. CONECTIVIDAD"
+ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 && echo "  Internet: ✓ OK" || echo "  Internet: ✗ FALLO"
+
+echo ""
+echo "5. KERNEL Y EBPF"
+echo "  Kernel: $(uname -r)"
+grep -q CONFIG_BPF=y /boot/config-$(uname -r) 2>/dev/null && echo "  eBPF: ✓ Soportado" || echo "  eBPF: ? Desconocido"
+```
+
+## Component Failure Recovery
+
+### Automatic Restart
+
+For production, use systemd with restart policies:
+
+```ini
+[Service]
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=300
+StartLimitBurst=5
+```
+
+### Manual Recovery
+
+```bash
+# Stop all components
+kill-lab
+
+# Clean up any stale resources
+sudo ipset flush ml_defender_blacklist_test
+sudo iptables -F ML_DEFENDER_TEST
+
+# Restart in correct order
+run-lab
+
+# Monitor for issues
+logs-lab
+```
+
+### State Recovery
+
+```bash
+# Export current IPSet before restart
+sudo ipset save ml_defender_blacklist_test > ipset_backup.txt
+
+# After restart, restore
+sudo ipset restore < ipset_backup.txt
+```
+
+## Getting Help
+
+### Log Collection
+
+When reporting issues, collect logs:
+
+```bash
+# Collect all logs
+cd /vagrant
+tar -czf ml-defender-logs-$(date +%Y%m%d_%H%M%S).tar.gz logs/
+
+# Include component versions
+echo "Sniffer: $(/vagrant/sniffer/build/sniffer --version)" > versions.txt
+echo "Detector: $(/vagrant/ml-detector/build/ml-detector --version)" >> versions.txt
+echo "Firewall: $(/vagrant/firewall-acl-agent/build/firewall-acl-agent --version)" >> versions.txt
+
+# Include system info
+uname -a >> versions.txt
+cat /etc/os-release >> versions.txt
+```
+
+### Community Support
+
+- **GitHub Issues**: https://github.com/ml-defender/aegisIDS/issues
+- **Discussions**: https://github.com/ml-defender/aegisIDS/discussions
+- **Documentation**: https://docs.ml-defender.org
+
+### Debug Mode
+
+Enable verbose logging:
+
+```json
+// config/*.json
+{
+  "logging": {
+    "level": "debug",
+    "console": true
+  },
+  "debug": {
+    "log_raw_protobuf": true,
+    "log_zmq_connection_events": true,
+    "log_crypto_operations": true
+  }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Set up proactive monitoring
+  </Card>
+  <Card title="Performance Tuning" icon="gauge-high" href="/operations/performance-tuning">
+    Optimize for better performance
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration/overview">
+    Review configuration options
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/components">
+    Understand component interactions
+  </Card>
+</CardGroup>

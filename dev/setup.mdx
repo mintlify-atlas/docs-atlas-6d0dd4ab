@@ -1,0 +1,352 @@
+---
+title: "Development Environment Setup"
+description: "Set up your development environment for ML Defender contributions"
+icon: "terminal"
+---
+
+## Prerequisites
+
+ML Defender requires a Linux environment with modern tooling. Development is optimized for Vagrant/VirtualBox workflow but can run on bare metal.
+
+### Required Tools
+
+- **Operating System**: Debian 12 (Bookworm) or Ubuntu 22.04+
+- **Kernel**: Linux 6.1+ (for eBPF CO-RE support)
+- **Compiler**: Clang 14+ and GCC 11+
+- **Build System**: CMake 3.20+, Make 4.3+
+- **Version Control**: Git 2.30+
+
+### System Dependencies
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential cmake git \
+    clang llvm libbpf-dev \
+    libzmq3-dev libprotobuf-dev protobuf-compiler \
+    libjsoncpp-dev libssl-dev liblz4-dev libzstd-dev \
+    libgrpc++-dev libetcd-cpp-api-dev \
+    ipset iptables python3 python3-pip \
+    linux-headers-$(uname -r)
+```
+
+### Hardware Recommendations
+
+- **CPU**: 4+ cores (6 recommended for parallel builds)
+- **RAM**: 8 GB minimum (16 GB recommended)
+- **Storage**: 50 GB SSD
+- **Network**: Gigabit Ethernet for packet capture testing
+
+---
+
+## Building from Source
+
+ML Defender uses a unified build system controlled by a single Makefile at the project root.
+
+<Steps>
+  <Step title="Clone Repository">
+    ```bash
+    git clone https://github.com/ml-defender/aegisIDS.git
+    cd aegisIDS
+    ```
+  </Step>
+
+  <Step title="Build All Components">
+    The root Makefile provides profile-aware builds:
+
+    <CodeGroup>
+    ```bash Debug Build (Default)
+    make PROFILE=debug all
+    ```
+
+    ```bash Production Build
+    make PROFILE=production all
+    ```
+
+    ```bash ThreadSanitizer Build
+    make PROFILE=tsan all
+    ```
+
+    ```bash AddressSanitizer Build
+    make PROFILE=asan all
+    ```
+    </CodeGroup>
+
+    Build profiles are defined in `Makefile` (lines 50-98):
+    - **production**: `-O3 -march=native -DNDEBUG -flto`
+    - **debug**: `-g -O0 -fno-omit-frame-pointer`
+    - **tsan**: `-fsanitize=thread -g -O1`
+    - **asan**: `-fsanitize=address -fsanitize=undefined -g -O1`
+  </Step>
+
+  <Step title="Verify Build">
+    ```bash
+    make test
+    ```
+
+    Expected output:
+    ```
+    ✅ Sniffer built
+    ✅ Detector built
+    ✅ Firewall built
+    ```
+  </Step>
+
+  <Step title="Install (Optional)">
+    For Debian package installation:
+    ```bash
+    make -f Makefile.debian package
+    sudo dpkg -i sniffer-ebpf_*.deb
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Build System Architecture
+
+### Component Structure
+
+Each component builds to profile-specific directories:
+
+```
+sniffer/build-debug/          # Debug build
+sniffer/build-production/     # Production build
+sniffer/build-tsan/          # TSAN build
+sniffer/build -> build-debug # Symlink for compatibility
+```
+
+### CMake Configuration
+
+**All compiler flags are controlled by the root Makefile** (source/Makefile:75-93). Individual CMakeLists.txt files MUST NOT hardcode optimization flags.
+
+```cmake Example: sniffer/CMakeLists.txt
+# ❌ WRONG - Do not hardcode flags
+set(CMAKE_CXX_FLAGS "-O3 -march=native")
+
+# ✅ CORRECT - Flags come from Makefile
+# (CMake receives flags via CMAKE_CXX_FLAGS variable)
+```
+
+See source/sniffer/CMakeLists.txt:12-23 for the correct approach.
+
+### Makefile Targets
+
+| Target | Description |
+|--------|-------------|
+| `make all` | Build all components (current profile) |
+| `make proto` | Regenerate Protobuf definitions |
+| `make sniffer` | Build eBPF sniffer |
+| `make ml-detector` | Build ML detector |
+| `make firewall` | Build firewall agent |
+| `make etcd-server` | Build etcd server |
+| `make tools` | Build testing tools |
+| `make clean` | Clean current profile |
+| `make clean-all` | Clean ALL profiles |
+| `make rebuild` | Clean + build |
+
+---
+
+## IDE Setup
+
+### Visual Studio Code
+
+Recommended extensions:
+- **C/C++** (ms-vscode.cpptools)
+- **CMake Tools** (ms-vscode.cmake-tools)
+- **clangd** (llvm-vs-code-extensions.vscode-clangd)
+
+Workspace settings (`.vscode/settings.json`):
+```json
+{
+  "C_Cpp.default.compilerPath": "/usr/bin/clang",
+  "C_Cpp.default.cppStandard": "c++20",
+  "cmake.buildDirectory": "${workspaceFolder}/build-debug",
+  "clangd.arguments": [
+    "--background-index",
+    "--compile-commands-dir=${workspaceFolder}/build-debug"
+  ]
+}
+```
+
+### CLion
+
+1. Open project root
+2. **Settings → Build → CMake**:
+   - Build type: `Debug`
+   - CMake options: `-DCMAKE_BUILD_TYPE=Debug`
+3. **Settings → Tools → External Tools** → Add Makefile targets
+
+### Vim/Neovim
+
+Use `compile_commands.json` for LSP:
+```vim
+let g:clangd_cmd = ['clangd', '--compile-commands-dir=build-debug']
+```
+
+---
+
+## Git Workflow
+
+### Branching Strategy
+
+- **main**: Production-ready code
+- **develop**: Integration branch
+- **feature/**: New features (`feature/day52-config-driven`)
+- **fix/**: Bug fixes (`fix/crypto-pipeline-leak`)
+- **test/**: Experimental tests
+
+### Commit Message Format
+
+Follow the project's style (see source/README.md:373-397):
+
+```
+type(scope): brief description
+
+Detailed explanation of changes.
+
+AI Collaboration: Claude assisted with design
+```
+
+**Types**: `feat`, `fix`, `refactor`, `test`, `docs`, `perf`
+
+### Example Workflow
+
+```bash
+# Create feature branch
+git checkout -b feature/new-detection-model
+
+# Make changes
+vim ml-detector/src/detector.cpp
+
+# Build and test
+make PROFILE=debug ml-detector
+./ml-detector/build-debug/ml-detector --test
+
+# Commit
+git add ml-detector/src/detector.cpp
+git commit -m "feat(detector): add botnet detection model
+
+Implemented new RandomForest model for botnet C2 detection.
+Accuracy: 97.8% on CTU-13 dataset.
+
+AI Collaboration: DeepSeek assisted with feature engineering"
+
+# Push and create PR
+git push origin feature/new-detection-model
+```
+
+---
+
+## AI Collaboration Guidelines
+
+**ML Defender practices transparent AI collaboration** (source/README.md:245-262).
+
+### Principles
+
+1. **Credit all AI assistants** used in development
+2. **Document AI contributions** in commit messages
+3. **Validate AI-generated code** with tests
+4. **Report actual results**, not inflated claims
+
+### Commit Message Disclosure
+
+```
+feat(sniffer): optimize eBPF ring buffer
+
+Reduced memory overhead by 40% through adaptive batching.
+
+AI Collaboration:
+- Claude: Initial design and code review
+- ChatGPT: Performance analysis suggestions
+- Verified by human testing (36K events, 0 errors)
+```
+
+### AI Tools Used in This Project
+
+- **Claude** (Anthropic): Architecture design, code review
+- **DeepSeek**: Algorithm optimization, debugging
+- **Grok**: Performance analysis
+- **ChatGPT**: Research and documentation
+- **Qwen**: Code review and testing
+
+See source/README.md:412-420 for full acknowledgments.
+
+---
+
+## Development Scripts
+
+Useful scripts in `scripts/`:
+
+```bash
+# Full lab environment
+scripts/run_lab_dev.sh
+
+# Integration validation
+scripts/verify_rag_ecosystem.sh
+
+# Build dependency order test
+scripts/test_build_dependency_order.sh
+
+# TSAN integration test
+scripts/tsan-integration-test.sh
+
+# Stability testing
+scripts/stability_test_v2.sh
+```
+
+---
+
+## Troubleshooting
+
+### Build Fails with "libbpf not found"
+
+```bash
+# Check libbpf version (need 1.2.0+)
+pkg-config --modversion libbpf
+
+# If < 1.2.0, upgrade:
+sudo apt-get install libbpf-dev=1.2.0 or higher
+```
+
+### "BPF map bug" Error
+
+This is fixed in libbpf 1.2.0+ (see Makefile:645-665 for diagnostics).
+
+```bash
+make check-libbpf
+make diagnose-bpf
+```
+
+### Protobuf Version Mismatch
+
+```bash
+make proto-verify
+```
+
+### CMake Cache Issues
+
+```bash
+make clean-all  # Clean all profiles
+rm -rf build-*/ CMakeCache.txt
+make PROFILE=debug all
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing Guide" icon="flask" href="/dev/testing">
+    Learn how to run tests and validate changes
+  </Card>
+  <Card title="Build System" icon="hammer" href="/dev/building">
+    Deep dive into CMake and Makefile configuration
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Understand the system design
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/contributing">
+    Submit your first contribution
+  </Card>
+</CardGroup>

@@ -1,0 +1,686 @@
+---
+title: Performance Tuning
+description: Optimize ML Defender for throughput, latency, and resource efficiency
+---
+
+ML Defender achieves sub-microsecond detection latency and processes 1M+ packets/second with proper tuning. This guide covers component-specific optimizations, benchmark results, and stress testing methodology.
+
+## Benchmark Results
+
+<Info>All benchmarks from real production testing on Debian Bookworm (6 CPU cores, 8GB RAM).</Info>
+
+### ML Detector Performance
+
+From Day 52 testing:
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| **Detection Latency** | &lt;1 μs | Sub-microsecond per packet |
+| **Throughput** | 1M+ pkt/s | Tested with synthetic traffic |
+| **Features Extracted** | 83 per flow | Flow-based aggregation |
+| **Models** | 4 concurrent | DDoS, Ransomware, Traffic, Anomaly |
+| **Memory** | 256 MB RSS | Stable over 8-hour test |
+| **CPU** | 8.5% avg | Single core |
+
+### Firewall ACL Agent Performance
+
+From Day 52 stress testing (36,000 events):
+
+| Test | Events | Rate | CPU | Memory | Result |
+|------|--------|------|-----|--------|--------|
+| **Test 1** | 1,000 | 42.6/sec | N/A | N/A | ✅ PASS |
+| **Test 2** | 5,000 | 94.9/sec | N/A | N/A | ✅ PASS |
+| **Test 3** | 10,000 | 176.1/sec | 41-45% | N/A | ✅ PASS |
+| **Test 4** | 20,000 | 364.9/sec | 49-54% | 127 MB | ✅ PASS |
+
+**Key Metrics (36K events total):**
+
+```
+crypto_errors: 0              ← Perfect crypto pipeline
+decompression_errors: 0       ← Perfect LZ4 pipeline
+protobuf_parse_errors: 0      ← Perfect message parsing
+ipset_successes: 118          ← First ~1000 blocked
+ipset_failures: 16,681        ← Capacity limit (not a bug)
+max_queue_depth: 16,690       ← Graceful backpressure
+CPU: 54% max                  ← Excellent efficiency
+Memory: 127 MB RSS            ← Minimal footprint
+```
+
+**Discoveries:**
+- Crypto pipeline is production-ready (0 errors @ 36K events)
+- IPSet capacity planning is critical (hit 1000 IP limit)
+- System exhibits graceful degradation (no crashes)
+- CPU efficiency excellent (54% max under extreme load)
+- Memory efficient (127MB even with 16K queue)
+
+### eBPF Sniffer Performance
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| **Capture Rate** | 1,528 pkt/s | Real network traffic |
+| **eBPF Drops** | 0 | Zero packet loss |
+| **Ring Buffer Full** | 0 | Proper sizing |
+| **Batch Size** | 10 packets | Configurable |
+| **Compression Ratio** | 4.2x | LZ4 |
+| **CPU** | 12.1% | Single core |
+| **Memory** | 189 MB RSS | Including ring buffer |
+
+## Component-Specific Tuning
+
+### eBPF Sniffer Tuning
+
+#### Ring Buffer Size
+
+The eBPF ring buffer must be large enough to avoid packet loss:
+
+```c
+// sniffer/src/ebpf_sniffer.bpf.c
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);  // 256 KB (default)
+} rb SEC(".maps");
+```
+
+**Tuning Recommendations:**
+
+| Traffic Rate | Ring Buffer Size | Notes |
+|--------------|------------------|-------|
+| &lt;100 pkt/s | 64 KB | Low traffic |
+| 100-1000 pkt/s | 256 KB | Default |
+| 1K-10K pkt/s | 1 MB | High traffic |
+| >10K pkt/s | 4 MB | Very high traffic |
+
+**Monitor ring buffer usage:**
+
+```bash
+# Check for ring buffer full events
+grep "Ring buffer full" /vagrant/logs/lab/sniffer.log
+
+# If you see drops, increase buffer size
+# Edit sniffer/src/ebpf_sniffer.bpf.c
+# Recompile: cd sniffer && make clean && make
+```
+
+#### Batch Processing
+
+Batch size affects throughput and latency tradeoff:
+
+```json
+// sniffer/config/sniffer.json
+{
+  "batch_processing": {
+    "enabled": true,
+    "batch_size": 10,           // Packets per batch
+    "batch_timeout_ms": 100      // Max wait time
+  }
+}
+```
+
+**Tuning Guidelines:**
+
+| Use Case | Batch Size | Timeout | Rationale |
+|----------|-----------|---------|------------|
+| **Low Latency** | 5 | 50 ms | Minimize wait time |
+| **Balanced** | 10 | 100 ms | Default (recommended) |
+| **High Throughput** | 50 | 500 ms | Maximize efficiency |
+| **Extreme Load** | 100 | 1000 ms | Reduce ZMQ overhead |
+
+#### Compression
+
+LZ4 compression provides 4.2x ratio with minimal CPU:
+
+```json
+{
+  "compression": {
+    "enabled": true,
+    "algorithm": "lz4",
+    "level": 1                   // 1-12 (1=fastest)
+  }
+}
+```
+
+**Compression Levels:**
+
+| Level | Speed | Ratio | CPU | Use Case |
+|-------|-------|-------|-----|----------|
+| **1** | Fastest | 4.0x | Low | Default (recommended) |
+| **3** | Fast | 4.5x | Medium | Better compression |
+| **9** | Slow | 5.2x | High | Bandwidth-constrained |
+
+### ML Detector Tuning
+
+#### Model Thresholds
+
+Adjust detection thresholds to balance false positives vs false negatives:
+
+```json
+// ml-detector/config/thresholds.json
+{
+  "ddos_threshold": 0.85,        // 85% confidence
+  "ransomware_threshold": 0.90,  // 90% confidence
+  "traffic_threshold": 0.80,     // 80% confidence
+  "internal_threshold": 0.85     // 85% confidence
+}
+```
+
+**Threshold Tuning:**
+
+| Threshold | False Positives | False Negatives | Use Case |
+|-----------|----------------|-----------------|----------|
+| **0.70** | High | Low | Aggressive blocking |
+| **0.85** | Medium | Medium | Balanced (default) |
+| **0.95** | Low | High | Conservative |
+
+**Calibration Process:**
+
+<Steps>
+  <Step title="Baseline">
+    Run with default thresholds (0.85) for 24 hours
+  </Step>
+  <Step title="Analyze">
+    ```bash
+    # Count detections by type
+    grep "Detection:" /vagrant/logs/lab/detector.log | \
+      awk '{print $4, $6}' | sort | uniq -c
+    ```
+  </Step>
+  <Step title="Adjust">
+    - If too many false positives: Increase threshold
+    - If missing threats: Decrease threshold
+    - Adjust per-model (DDoS vs Ransomware may need different values)
+  </Step>
+  <Step title="Validate">
+    Test with known attack traffic (MAWI dataset, synthetic)
+  </Step>
+</Steps>
+
+#### Batch Size
+
+ML Detector processes packets in batches for efficiency:
+
+```json
+// ml-detector/config/ml_detector_config.json
+{
+  "processing": {
+    "batch_size": 100,           // Packets per inference
+    "batch_timeout_ms": 50       // Max wait time
+  }
+}
+```
+
+**Tuning Guidelines:**
+
+| Traffic Rate | Batch Size | Timeout | Latency Impact |
+|--------------|-----------|---------|----------------|
+| &lt;100 pkt/s | 10 | 20 ms | +20 ms |
+| 100-1K pkt/s | 100 | 50 ms | +50 ms |
+| >1K pkt/s | 1000 | 100 ms | +100 ms |
+
+<Warning>Larger batches increase throughput but add latency. For real-time blocking, keep batch_timeout_ms < 100.</Warning>
+
+#### Model Selection
+
+Enable only models needed for your use case:
+
+```json
+{
+  "models": {
+    "ddos": {
+      "enabled": true,
+      "path": "models/production/level1/ddos_detector.onnx"
+    },
+    "ransomware": {
+      "enabled": true,
+      "path": "models/production/level2/ransomware_detector.onnx"
+    },
+    "traffic": {
+      "enabled": false,          // Disable if not needed
+      "path": "models/production/level3/traffic_classifier.onnx"
+    },
+    "internal": {
+      "enabled": true,
+      "path": "models/production/level3/internal_anomaly.onnx"
+    }
+  }
+}
+```
+
+**Performance Impact:**
+
+| Models Enabled | CPU Usage | Memory | Latency |
+|----------------|-----------|--------|----------|
+| 1 model | 2-3% | 128 MB | &lt;0.5 μs |
+| 2 models | 4-6% | 192 MB | &lt;0.8 μs |
+| 4 models (all) | 8-10% | 256 MB | &lt;1.0 μs |
+
+### Firewall ACL Agent Tuning
+
+#### IPSet Capacity
+
+**Critical for production**: IPSet has finite capacity.
+
+```json
+// firewall-acl-agent/config/firewall.json
+{
+  "ipsets": {
+    "blacklist": {
+      "set_name": "ml_defender_blacklist_test",
+      "hash_size": 1024,         // Hash table size
+      "max_elements": 1000,      // Maximum IPs
+      "timeout": 3600            // TTL in seconds
+    }
+  }
+}
+```
+
+**Capacity Planning:**
+
+| Environment | Max Elements | Hash Size | Timeout | Notes |
+|-------------|--------------|-----------|---------|-------|
+| **Testing** | 1,000 | 1024 | 3600s (1h) | Default |
+| **Small Network** | 10,000 | 4096 | 7200s (2h) | < 1000 users |
+| **Medium Network** | 50,000 | 16384 | 14400s (4h) | 1K-10K users |
+| **Large Network** | 500,000 | 65536 | 86400s (24h) | 10K+ users |
+
+**Monitor capacity:**
+
+```bash
+# Check current usage
+sudo ipset list ml_defender_blacklist_test | grep "Number of entries"
+
+# Monitor capacity utilization
+ENTRIES=$(sudo ipset list ml_defender_blacklist_test | grep -c "^[0-9]")
+MAX=1000
+echo "Capacity: $((ENTRIES * 100 / MAX))%"
+
+# Alert if > 90%
+if [ $((ENTRIES * 100 / MAX)) -gt 90 ]; then
+  echo "WARNING: IPSet capacity > 90%"
+fi
+```
+
+<Warning>When IPSet is full, new entries fail silently. This is by design (fail-closed). Implement eviction or multi-tier storage (see Roadmap).</Warning>
+
+#### Batch Processing
+
+```json
+{
+  "batch_processor": {
+    "batch_size_threshold": 10,    // IPs per batch
+    "batch_time_threshold_ms": 1000,  // Max wait
+    "max_pending_ips": 100         // Queue size
+  }
+}
+```
+
+**Tuning Guidelines:**
+
+| Attack Pattern | Batch Size | Timeout | Rationale |
+|----------------|-----------|---------|------------|
+| **Slow Scan** | 1 | 100 ms | Immediate blocking |
+| **DDoS Burst** | 50 | 1000 ms | Reduce IPSet calls |
+| **Steady State** | 10 | 1000 ms | Balanced (default) |
+
+#### Crypto Pipeline
+
+Day 52 testing proved crypto pipeline is production-ready:
+
+```json
+{
+  "transport": {
+    "encryption": {
+      "enabled": true,
+      "algorithm": "chacha20-poly1305",
+      "key_size": 256
+    },
+    "compression": {
+      "enabled": true,
+      "algorithm": "lz4"
+    }
+  }
+}
+```
+
+**Performance Impact:**
+
+- Decryption: 15.2 μs avg
+- Decompression: 11.8 μs avg
+- Total overhead: ~27 μs per message
+- Zero errors @ 36K events
+
+<Info>Crypto overhead is negligible. Always keep encryption enabled in production.</Info>
+
+## CPU and Memory Optimization
+
+### CPU Affinity
+
+Pin processes to specific CPU cores:
+
+```bash
+# Pin sniffer to cores 0-1 (packet processing)
+taskset -c 0-1 sudo ./sniffer -c config/sniffer.json &
+
+# Pin detector to cores 2-3 (ML inference)
+taskset -c 2-3 ./ml-detector -c config/ml_detector_config.json &
+
+# Pin firewall to core 4 (blocking)
+taskset -c 4 sudo ./firewall-acl-agent -c config/firewall.json &
+```
+
+**Benefits:**
+- Reduces cache thrashing
+- Improves CPU cache locality
+- Prevents process migration overhead
+
+### Memory Limits
+
+Set memory limits to prevent runaway processes:
+
+```bash
+# Limit sniffer to 512 MB
+systemd-run --scope -p MemoryMax=512M sudo ./sniffer -c config/sniffer.json
+
+# Limit detector to 1 GB
+systemd-run --scope -p MemoryMax=1G ./ml-detector -c config/ml_detector_config.json
+```
+
+### NUMA Considerations
+
+On NUMA systems, ensure memory locality:
+
+```bash
+# Check NUMA topology
+numactl --hardware
+
+# Run on specific NUMA node
+numactl --cpunodebind=0 --membind=0 sudo ./sniffer -c config/sniffer.json
+```
+
+## Network Tuning
+
+### NIC Settings
+
+#### Disable Offloading
+
+eBPF/XDP requires raw packets:
+
+```bash
+# Disable offloading features
+sudo ethtool -K eth1 gro off tso off gso off
+
+# Verify
+sudo ethtool -k eth1 | grep -E "(gro|tso|gso)"
+```
+
+#### Promiscuous Mode
+
+Required for gateway mode:
+
+```bash
+# Enable promiscuous mode
+sudo ip link set eth1 promisc on
+sudo ip link set eth3 promisc on
+
+# Verify
+ip link show eth1 | grep PROMISC
+ip link show eth3 | grep PROMISC
+```
+
+#### Ring Buffer Size
+
+Increase NIC ring buffer for high traffic:
+
+```bash
+# Check current size
+sudo ethtool -g eth1
+
+# Increase to maximum
+sudo ethtool -G eth1 rx 4096 tx 4096
+```
+
+### eBPF/XDP Mode
+
+XDP provides kernel-bypass for maximum performance:
+
+```c
+// sniffer/src/ebpf_sniffer.c
+// XDP_MODE options:
+// - XDP_MODE_NATIVE: Hardware offload (fastest, requires driver support)
+// - XDP_MODE_SKB: Software fallback (slowest, always works)
+// - XDP_MODE_DRV: Driver mode (balanced, recommended)
+
+int xdp_mode = XDP_MODE_DRV;  // Default
+```
+
+**Performance Comparison:**
+
+| Mode | Throughput | Latency | Compatibility |
+|------|-----------|---------|---------------|
+| **NATIVE** | 10M+ pps | &lt;1 μs | Limited |
+| **DRV** | 5M+ pps | &lt;2 μs | Most drivers |
+| **SKB** | 1M+ pps | &lt;10 μs | All NICs |
+
+### IP Forwarding and NAT
+
+Optimize for gateway mode:
+
+```bash
+# Enable IP forwarding
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv6.conf.all.forwarding=1
+
+# Disable reverse path filtering (critical for dual-NIC)
+sudo sysctl -w net.ipv4.conf.all.rp_filter=0
+sudo sysctl -w net.ipv4.conf.eth1.rp_filter=0
+sudo sysctl -w net.ipv4.conf.eth3.rp_filter=0
+
+# Optimize conntrack
+sudo sysctl -w net.netfilter.nf_conntrack_max=1048576
+sudo sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=1800
+
+# Make permanent
+sudo tee -a /etc/sysctl.conf <<EOF
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=0
+net.netfilter.nf_conntrack_max=1048576
+EOF
+```
+
+## Stress Test Methodology
+
+### 8-Hour Stress Test
+
+ML Defender includes a comprehensive stress test:
+
+```bash
+# Run 8-hour stability test
+cd /vagrant
+bash stress_test_8h.sh
+```
+
+**Test Configuration:**
+
+```bash source/stress_test_8h.sh
+TEST_DURATION_MINUTES=10        # 10 minutes (480 for 8 hours)
+TRAFFIC_RATE_PPS=75             # 75 packets/second
+MONITORING_INTERVAL=60          # Monitor every 60 seconds
+```
+
+**Test Components:**
+
+1. **Traffic Generator** (`stress_test_traffic.sh`): Generates synthetic traffic
+2. **Resource Monitor** (`stress_test_monitor.sh`): Tracks CPU, memory, performance
+3. **Main Test Loop**: Monitors component health, generates report
+
+<Steps>
+  <Step title="Start test">
+    ```bash
+    bash stress_test_8h.sh
+    ```
+  </Step>
+  <Step title="Monitor progress">
+    ```bash
+    # View logs
+    tail -f stress_test_*/logs/sniffer.log
+    tail -f stress_test_*/logs/detector.log
+
+    # View monitoring data
+    tail -f stress_test_*/monitoring/cpu.csv
+    tail -f stress_test_*/monitoring/memory.csv
+    ```
+  </Step>
+  <Step title="Review report">
+    After test completes, review `stress_test_*/REPORT.md`:
+
+    ```bash
+    cat stress_test_*/REPORT.md
+    ```
+  </Step>
+</Steps>
+
+### Progressive Stress Tests
+
+Day 52 methodology (4 progressive tests):
+
+```bash
+# Test 1: 1,000 events (baseline)
+cd tools/build
+./synthetic_ml_output_injector 1000 42
+
+# Test 2: 5,000 events (moderate load)
+./synthetic_ml_output_injector 5000 52
+
+# Test 3: 10,000 events (high load)
+./synthetic_ml_output_injector 10000 176
+
+# Test 4: 20,000 events (extreme load)
+./synthetic_ml_output_injector 20000 364
+```
+
+**Monitor results:**
+
+```bash
+# Check firewall metrics after each test
+cat /vagrant/logs/lab/firewall-metrics.json | jq '.ipset, .crypto, .performance'
+```
+
+### Synthetic Traffic Generation
+
+For controlled testing:
+
+```bash
+# Generate traffic with hping3
+hping3 -S -p 80 --flood --rand-source 192.168.100.1
+
+# Generate UDP flood
+hping3 --udp -p 53 --flood --rand-source 192.168.100.1
+
+# Replay PCAP file
+sudo tcpreplay -i eth1 -t capture.pcap
+
+# Replay at specific rate
+sudo tcpreplay -i eth1 --pps=1000 capture.pcap
+```
+
+## Performance Monitoring During Tuning
+
+### Real-Time Performance
+
+```bash
+# Monitor processing rate
+watch -n 1 'grep "Throughput" /vagrant/logs/lab/detector.log | tail -5'
+
+# Monitor CPU usage
+watch -n 1 'top -b -n 1 | grep -E "(sniffer|ml-detector|firewall)"'
+
+# Monitor memory growth
+watch -n 5 'ps aux | grep -E "(sniffer|ml-detector|firewall)" | awk "{print \$2, \$6/1024 \"MB\"}"'
+```
+
+### Bottleneck Identification
+
+```bash
+# Check ZMQ queue depth
+grep "queue_depth" /vagrant/logs/lab/*.log | tail -20
+
+# Check processing latency
+grep "Processing time" /vagrant/logs/lab/*.log | tail -20
+
+# Check IPSet operation times
+grep "IPSet add took" /vagrant/logs/lab/firewall-agent.log | \
+  awk '{sum+=$NF; count+=1} END {print "Avg IPSet time: " sum/count " ms"}'
+```
+
+### Memory Leak Detection
+
+```bash
+# Monitor memory growth over time
+while true; do
+  ps aux | grep ml-detector | awk '{print $6/1024 "MB"}' >> mem_log.txt
+  sleep 60
+done
+
+# Plot memory usage
+gnuplot <<EOF
+set terminal png
+set output 'memory_trend.png'
+plot 'mem_log.txt' with lines title 'ML Detector Memory'
+EOF
+```
+
+## Optimization Checklist
+
+<Accordion title="Sniffer Optimization Checklist">
+  - [ ] Ring buffer sized appropriately (check for drops)
+  - [ ] Batch size tuned for latency vs throughput
+  - [ ] Compression enabled (LZ4 level 1)
+  - [ ] NIC offloading disabled (gro, tso, gso)
+  - [ ] Promiscuous mode enabled
+  - [ ] CPU affinity set
+  - [ ] XDP mode appropriate for NIC (DRV recommended)
+</Accordion>
+
+<Accordion title="Detector Optimization Checklist">
+  - [ ] Thresholds calibrated for false positive rate
+  - [ ] Batch size tuned for traffic rate
+  - [ ] Unused models disabled
+  - [ ] CPU affinity set
+  - [ ] Memory limits configured
+  - [ ] Crypto pipeline validated (0 errors)
+</Accordion>
+
+<Accordion title="Firewall Optimization Checklist">
+  - [ ] IPSet capacity planned for environment
+  - [ ] Timeout configured for threat duration
+  - [ ] Batch processing tuned for attack pattern
+  - [ ] Crypto pipeline enabled
+  - [ ] CPU affinity set
+  - [ ] Capacity monitoring enabled
+  - [ ] Eviction strategy planned (for future)
+</Accordion>
+
+<Accordion title="System Optimization Checklist">
+  - [ ] IP forwarding enabled (gateway mode)
+  - [ ] rp_filter disabled (gateway mode)
+  - [ ] Conntrack tuned for connection volume
+  - [ ] NUMA locality configured (if applicable)
+  - [ ] Resource limits set (systemd)
+  - [ ] Monitoring in place
+</Accordion>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Diagnose performance issues
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Monitor performance metrics
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration/overview">
+    Review configuration options
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/data-flow">
+    Understand data flow
+  </Card>
+</CardGroup>

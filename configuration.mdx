@@ -1,0 +1,787 @@
+---
+title: 'Configuration'
+description: 'Complete configuration reference for ML Defender components'
+icon: 'gear'
+---
+
+## Overview
+
+ML Defender uses JSON configuration files as the **single source of truth** for all components. All settings are externalized—no hardcoded values.
+
+<Info>
+**Via Appia Quality**: Configuration files are the law. All runtime behavior is controlled via JSON, enabling deployment without recompilation.
+</Info>
+
+---
+
+## Configuration File Locations
+
+| Component | Config File | Description |
+|-----------|-------------|-------------|
+| **Firewall Agent** | `firewall-acl-agent/config/firewall.json` | IPSet, IPTables, decryption settings |
+| **ML Detector** | `ml-detector/config/ml_detector_config.json` | Model paths, thresholds, inference settings |
+| **Sniffer** | `sniffer/config/sniffer.json` | Interface, eBPF settings, feature extraction |
+| **etcd Server** | `etcd-server/config/etcd-server.json` | Port, heartbeat, auto-restart |
+| **RAG Ingester** | `rag-ingester/config/rag-ingester.json` | FAISS index, embeddings, log parsing |
+
+---
+
+## Firewall ACL Agent Configuration
+
+**File**: `firewall-acl-agent/config/firewall.json`
+
+### Component Metadata
+
+<ParamField path="component.name" type="string" default="firewall-acl-agent">
+  Component identifier
+</ParamField>
+
+<ParamField path="component.version" type="string" default="1.2.1">
+  Configuration schema version
+</ParamField>
+
+<ParamField path="component.mode" type="string" default="packet_filtering">
+  Operational mode: `packet_filtering` or `logging_only`
+</ParamField>
+
+### Transport Layer
+
+<ParamField path="transport.compression.enabled" type="boolean" default="true">
+  Enable LZ4 decompression of incoming ML detector events
+</ParamField>
+
+<ParamField path="transport.compression.algorithm" type="string" default="lz4">
+  Compression algorithm (only `lz4` supported)
+</ParamField>
+
+<ParamField path="transport.encryption.enabled" type="boolean" default="true">
+  Enable ChaCha20-Poly1305 decryption
+</ParamField>
+
+<ParamField path="transport.encryption.algorithm" type="string" default="chacha20-poly1305">
+  Encryption algorithm (AEAD cipher)
+</ParamField>
+
+<ParamField path="transport.encryption.etcd_token_required" type="boolean" default="true">
+  Require crypto token from etcd (fail if unavailable)
+</ParamField>
+
+### etcd Configuration
+
+<ParamField path="etcd.enabled" type="boolean" default="true">
+  Enable etcd client for crypto key exchange
+</ParamField>
+
+<ParamField path="etcd.endpoints" type="array" default='["localhost:2379"]'>
+  List of etcd server endpoints
+</ParamField>
+
+<ParamField path="etcd.crypto_token_path" type="string" default="/crypto/firewall/tokens">
+  etcd path where decryption keys are stored
+</ParamField>
+
+<ParamField path="etcd.connection_timeout_ms" type="integer" default="5000">
+  Connection timeout in milliseconds
+</ParamField>
+
+<ParamField path="etcd.heartbeat_interval_seconds" type="integer" default="30">
+  Heartbeat interval for service health monitoring
+</ParamField>
+
+### ZeroMQ Configuration
+
+<ParamField path="zmq.endpoint" type="string" default="tcp://localhost:5572">
+  ZMQ endpoint to receive encrypted events from ml-detector
+</ParamField>
+
+<ParamField path="zmq.topic" type="string" default="">
+  ZMQ PUB/SUB topic filter (empty = subscribe to all)
+</ParamField>
+
+<ParamField path="zmq.recv_timeout_ms" type="integer" default="1000">
+  Receive timeout in milliseconds
+</ParamField>
+
+<ParamField path="zmq.high_water_mark" type="integer" default="1000">
+  Maximum messages queued before dropping
+</ParamField>
+
+### IPSet Configuration
+
+<Warning>
+**Critical**: IPSet capacity planning is essential. Once full, new IPs are queued but not blocked.
+</Warning>
+
+<ParamField path="ipsets.blacklist.set_name" type="string" default="ml_defender_blacklist_test">
+  IPSet name for blocked IPs
+</ParamField>
+
+<ParamField path="ipsets.blacklist.set_type" type="string" default="hash:ip">
+  IPSet type: `hash:ip`, `hash:net`, `hash:ip,port`
+</ParamField>
+
+<ParamField path="ipsets.blacklist.max_elements" type="integer" default="1000">
+  Maximum IPs in IPSet. **Production**: Set to 5000-10000
+</ParamField>
+
+<ParamField path="ipsets.blacklist.timeout" type="integer" default="3600">
+  IP entry timeout in seconds (0 = permanent)
+</ParamField>
+
+<ParamField path="ipsets.blacklist.hash_size" type="integer" default="1024">
+  Hash table size (power of 2 recommended)
+</ParamField>
+
+<ParamField path="ipsets.blacklist.create_if_missing" type="boolean" default="true">
+  Auto-create IPSet on startup if not exists
+</ParamField>
+
+<ParamField path="ipsets.blacklist.flush_on_startup" type="boolean" default="false">
+  Clear IPSet on startup (use `true` for testing)
+</ParamField>
+
+#### Example: Increase IPSet Capacity
+
+```json
+"ipsets": {
+  "blacklist": {
+    "set_name": "ml_defender_blacklist_prod",
+    "max_elements": 10000,
+    "timeout": 7200,
+    "hash_size": 4096
+  }
+}
+```
+
+### IPTables Configuration
+
+<ParamField path="iptables.chain_name" type="string" default="ML_DEFENDER_TEST">
+  IPTables chain name for ML Defender rules
+</ParamField>
+
+<ParamField path="iptables.default_policy" type="string" default="ACCEPT">
+  Default policy for chain: `ACCEPT` or `DROP`
+</ParamField>
+
+<ParamField path="iptables.log_blocked" type="boolean" default="true">
+  Log blocked packets to syslog
+</ParamField>
+
+<ParamField path="iptables.log_prefix" type="string" default="ML_DEFENDER_TEST_DROP: ">
+  Prefix for syslog entries
+</ParamField>
+
+<ParamField path="iptables.insert_rule_position" type="integer" default="1">
+  Position in chain (1 = first rule, highest priority)
+</ParamField>
+
+### Batch Processor
+
+<ParamField path="batch_processor.batch_size_threshold" type="integer" default="10">
+  Batch size before committing to IPSet
+</ParamField>
+
+<ParamField path="batch_processor.batch_time_threshold_ms" type="integer" default="1000">
+  Max time to wait before flushing batch (ms)
+</ParamField>
+
+<ParamField path="batch_processor.min_confidence" type="float" default="0.5">
+  Minimum ML confidence score to block (0.0-1.0)
+</ParamField>
+
+### Logging
+
+<ParamField path="logging.level" type="string" default="debug">
+  Log level: `debug`, `info`, `warn`, `error`
+</ParamField>
+
+<ParamField path="logging.file" type="string" default="/vagrant/logs/lab/firewall-agent.log">
+  Log file path (single source of truth)
+</ParamField>
+
+<ParamField path="logging.max_file_size_mb" type="integer" default="10">
+  Max log file size before rotation
+</ParamField>
+
+<ParamField path="logging.backup_count" type="integer" default="5">
+  Number of rotated log files to keep
+</ParamField>
+
+### Metrics
+
+<ParamField path="metrics.enable_export" type="boolean" default="true">
+  Enable JSON metrics export
+</ParamField>
+
+<ParamField path="metrics.export_interval_sec" type="integer" default="30">
+  Metrics export interval in seconds
+</ParamField>
+
+<ParamField path="metrics.export_file" type="string" default="/vagrant/logs/lab/firewall-metrics.json">
+  Metrics output file path
+</ParamField>
+
+#### Metrics Schema
+
+```json
+{
+  "timestamp": "2026-02-08T15:30:00Z",
+  "zmq_messages_received": 36000,
+  "crypto_errors": 0,
+  "decompression_errors": 0,
+  "protobuf_parse_errors": 0,
+  "ipset_successes": 118,
+  "ipset_failures": 16681,
+  "max_queue_depth": 16690,
+  "avg_processing_time_us": 450,
+  "cpu_percent": 54.2,
+  "memory_rss_mb": 127
+}
+```
+
+---
+
+## ML Detector Configuration
+
+**File**: `ml-detector/config/ml_detector_config.json`
+
+### Model Configuration
+
+<ParamField path="ml.models_base_dir" type="string" default="models/production">
+  Base directory for ML models
+</ParamField>
+
+#### Level 1: Attack Detector
+
+<ParamField path="ml.level1.enabled" type="boolean" default="true">
+  Enable Level 1 general attack detection
+</ParamField>
+
+<ParamField path="ml.level1.model_file" type="string" default="level1/level1_attack_detector.onnx">
+  ONNX model file path (relative to `models_base_dir`)
+</ParamField>
+
+<ParamField path="ml.level1.features_count" type="integer" default="23">
+  Number of input features
+</ParamField>
+
+<ParamField path="ml.thresholds.level1_attack" type="float" default="0.65">
+  Detection threshold (0.0-1.0)
+</ParamField>
+
+#### Level 2: DDoS Detection (Embedded C++20)
+
+<ParamField path="ml.level2.ddos.enabled" type="boolean" default="true">
+  Enable embedded RandomForest DDoS detector
+</ParamField>
+
+<ParamField path="ml.level2.ddos.features_count" type="integer" default="10">
+  Number of input features
+</ParamField>
+
+<ParamField path="ml.level2.ddos.model_type" type="string" default="RandomForest-Embedded">
+  Model type (embedded C++20, no ONNX required)
+</ParamField>
+
+<ParamField path="ml.thresholds.level2_ddos" type="float" default="0.7">
+  DDoS detection threshold
+</ParamField>
+
+**Features**:
+- `syn_ack_ratio`: SYN/ACK packet ratio
+- `packet_symmetry`: Bidirectional traffic balance
+- `source_ip_dispersion`: Unique source IPs
+- `protocol_anomaly_score`: Protocol distribution anomaly
+- `packet_size_entropy`: Shannon entropy of packet sizes
+- `traffic_amplification_factor`: Amplification attack indicator
+- `flow_completion_rate`: TCP handshake completion rate
+- `geographical_concentration`: IP geolocation clustering
+- `traffic_escalation_rate`: Rate of traffic increase
+- `resource_saturation_score`: System resource pressure
+
+#### Level 2: Ransomware Detection (Embedded C++20)
+
+<ParamField path="ml.level2.ransomware.enabled" type="boolean" default="true">
+  Enable embedded RandomForest ransomware detector
+</ParamField>
+
+<ParamField path="ml.level2.ransomware.features_count" type="integer" default="10">
+  Number of input features
+</ParamField>
+
+<ParamField path="ml.thresholds.level2_ransomware" type="float" default="0.75">
+  Ransomware detection threshold
+</ParamField>
+
+**Features**:
+- `io_intensity`: File I/O rate
+- `entropy`: File entropy (encrypted data indicator)
+- `resource_usage`: CPU/memory consumption
+- `network_activity`: C2 communication patterns
+- `file_operations`: File modification frequency
+- `process_anomaly`: Unusual process behavior
+- `temporal_pattern`: Time-series anomalies
+- `access_frequency`: File access patterns
+- `data_volume`: Data transfer volume
+- `behavior_consistency`: Deviation from baseline
+
+#### Level 3: Traffic Classification (Embedded C++20)
+
+<ParamField path="ml.level3.web.enabled" type="boolean" default="true">
+  Enable traffic classification (Internet vs Internal)
+</ParamField>
+
+<ParamField path="ml.level3.web.features_count" type="integer" default="10">
+  Number of input features
+</ParamField>
+
+<ParamField path="ml.thresholds.level3_web" type="float" default="0.6">
+  Traffic classification threshold
+</ParamField>
+
+#### Level 3: Internal Traffic Analysis (Embedded C++20)
+
+<ParamField path="ml.level3.internal.enabled" type="boolean" default="true">
+  Enable internal traffic anomaly detection
+</ParamField>
+
+<ParamField path="ml.level3.internal.features_count" type="integer" default="10">
+  Number of input features
+</ParamField>
+
+<ParamField path="ml.thresholds.level3_internal" type="float" default="0.65">
+  Internal traffic threshold
+</ParamField>
+
+**Use Cases**: Lateral movement, data exfiltration, service discovery
+
+### Transport Configuration
+
+<ParamField path="transport.compression.enabled" type="boolean" default="true">
+  Enable LZ4 compression of outgoing events
+</ParamField>
+
+<ParamField path="transport.compression.level" type="integer" default="1">
+  LZ4 compression level (1-12, 1=fastest)
+</ParamField>
+
+<ParamField path="transport.encryption.enabled" type="boolean" default="true">
+  Enable ChaCha20-Poly1305 encryption
+</ParamField>
+
+<ParamField path="transport.encryption.key_rotation_hours" type="integer" default="24">
+  Automatic key rotation interval (hours)
+</ParamField>
+
+### ZeroMQ Output
+
+<ParamField path="network.output_socket.endpoint" type="string" default="tcp://0.0.0.0:5572">
+  ZMQ publisher endpoint (binds to this address)
+</ParamField>
+
+<ParamField path="network.output_socket.socket_type" type="string" default="PUB">
+  Socket type: `PUB` (publish-subscribe)
+</ParamField>
+
+### RAG Logger
+
+<ParamField path="rag_logger.enabled" type="boolean" default="true">
+  Enable RAG-compatible event logging
+</ParamField>
+
+<ParamField path="rag_logger.base_dir" type="string" default="/vagrant/logs/rag">
+  Base directory for RAG logs
+</ParamField>
+
+<ParamField path="rag_logger.log_detections_only" type="boolean" default="true">
+  Log only detection events (threshold exceeded)
+</ParamField>
+
+<ParamField path="rag_logger.min_score_threshold" type="float" default="0.5">
+  Minimum score to log event
+</ParamField>
+
+---
+
+## Sniffer Configuration
+
+**File**: `sniffer/config/sniffer.json`
+
+### Deployment Mode
+
+<ParamField path="deployment.mode" type="string" default="dual">
+  Deployment mode:
+  - `host-only`: Single NIC, host protection
+  - `gateway-only`: Single NIC, transit traffic inspection
+  - `dual`: Dual NIC, simultaneous host + gateway
+  - `validation`: PCAP replay testing
+</ParamField>
+
+### Network Interfaces
+
+<ParamField path="deployment.host_interface.name" type="string" default="eth1">
+  WAN-facing interface for host-based IDS
+</ParamField>
+
+<ParamField path="deployment.host_interface.xdp_mode" type="string" default="native">
+  XDP mode: `native`, `offloaded`, `skb` (generic)
+</ParamField>
+
+<ParamField path="deployment.gateway_interface.name" type="string" default="eth2">
+  LAN-facing interface for gateway mode
+</ParamField>
+
+<ParamField path="deployment.gateway_interface.promiscuous" type="boolean" default="true">
+  Enable promiscuous mode (required for gateway)
+</ParamField>
+
+### eBPF Configuration
+
+<ParamField path="kernel_space.ebpf_program" type="string" default="sniffer.bpf.o">
+  Compiled eBPF object file
+</ParamField>
+
+<ParamField path="kernel_space.xdp_mode" type="string" default="skb">
+  XDP attach mode: `native`, `offloaded`, `skb`
+</ParamField>
+
+<ParamField path="kernel_space.ring_buffer_size" type="integer" default="1048576">
+  eBPF ring buffer size (bytes)
+</ParamField>
+
+<ParamField path="kernel_space.max_flows_in_kernel" type="integer" default="500000">
+  Maximum concurrent flows tracked in kernel
+</ParamField>
+
+<ParamField path="kernel_space.flow_timeout_seconds" type="integer" default="300">
+  Flow entry timeout (5 minutes)
+</ParamField>
+
+### Fast Detector (Heuristics)
+
+<Warning>
+**Day 12 Enhancement**: Fast path detection runs at &lt;1μs for obvious threats before ML inference.
+</Warning>
+
+<ParamField path="fast_detector.enabled" type="boolean" default="true">
+  Enable fast heuristic detection
+</ParamField>
+
+<ParamField path="fast_detector.ransomware.scores.high_threat" type="float" default="0.95">
+  Score for confirmed ransomware patterns
+</ParamField>
+
+<ParamField path="fast_detector.ransomware.activation_thresholds.external_ips_30s" type="integer" default="15">
+  Trigger if >15 external IPs contacted in 30 seconds
+</ParamField>
+
+<ParamField path="fast_detector.ransomware.activation_thresholds.smb_diversity" type="integer" default="10">
+  Trigger if >10 unique SMB destinations (lateral movement)
+</ParamField>
+
+<ParamField path="fast_detector.ransomware.activation_thresholds.dns_entropy" type="float" default="2.5">
+  Trigger if DNS query entropy >2.5 (DGA detection)
+</ParamField>
+
+<ParamField path="fast_detector.ransomware.activation_thresholds.upload_download_ratio" type="float" default="3.0">
+  Trigger if upload/download ratio >3.0 (exfiltration)
+</ParamField>
+
+### ML Defender Thresholds
+
+<ParamField path="ml_defender.thresholds.ddos" type="float" default="0.85">
+  DDoS detection threshold (conservative for PCAP validation)
+</ParamField>
+
+<ParamField path="ml_defender.thresholds.ransomware" type="float" default="0.90">
+  Ransomware detection threshold
+</ParamField>
+
+<ParamField path="ml_defender.thresholds.traffic" type="float" default="0.80">
+  Traffic classification threshold
+</ParamField>
+
+<ParamField path="ml_defender.thresholds.internal" type="float" default="0.85">
+  Internal traffic anomaly threshold
+</ParamField>
+
+---
+
+## etcd Server Configuration
+
+**File**: `etcd-server/config/etcd-server.json`
+
+<ParamField path="server.port" type="integer" default="2379">
+  etcd client API port
+</ParamField>
+
+<ParamField path="server.host" type="string" default="0.0.0.0">
+  Bind address (0.0.0.0 = all interfaces)
+</ParamField>
+
+<ParamField path="server.worker_threads" type="integer" default="4">
+  Number of worker threads
+</ParamField>
+
+### Heartbeat Monitoring
+
+<ParamField path="heartbeat.enabled" type="boolean" default="true">
+  Enable service heartbeat monitoring
+</ParamField>
+
+<ParamField path="heartbeat.interval_seconds" type="integer" default="30">
+  Heartbeat check interval
+</ParamField>
+
+<ParamField path="heartbeat.timeout_multiplier" type="integer" default="3">
+  Service considered dead after `interval * multiplier` seconds
+</ParamField>
+
+### Auto-Restart
+
+<ParamField path="auto_restart.enabled" type="boolean" default="true">
+  Auto-restart failed services
+</ParamField>
+
+<ParamField path="auto_restart.max_attempts" type="integer" default="3">
+  Maximum restart attempts
+</ParamField>
+
+<ParamField path="auto_restart.delay_seconds" type="integer" default="5">
+  Delay between restart attempts
+</ParamField>
+
+<ParamField path="auto_restart.commands.sniffer" type="string">
+  Command to restart sniffer
+  ```bash
+  cd /vagrant/sniffer/build && sudo ./sniffer -c ../config/sniffer.json
+  ```
+</ParamField>
+
+---
+
+## RAG Ingester Configuration
+
+**File**: `rag-ingester/config/rag-ingester.json`
+
+### Service Identity
+
+<ParamField path="service.id" type="string" default="rag-ingester-default">
+  Unique service identifier
+</ParamField>
+
+<ParamField path="service.etcd.endpoints" type="array" default='["127.0.0.1:2379"]'>
+  etcd endpoints for service registration
+</ParamField>
+
+<ParamField path="service.etcd.partner_detector" type="string" default="ml-detector-default">
+  Partner ml-detector service ID for crypto key sync
+</ParamField>
+
+### Input Configuration
+
+<ParamField path="ingester.input.source" type="string" default="file_watch">
+  Input source: `file_watch` or `zmq_stream`
+</ParamField>
+
+<ParamField path="ingester.input.directory" type="string" default="/vagrant/logs/rag/synthetic/artifacts/2026-01-24">
+  Directory to watch for new log files
+</ParamField>
+
+<ParamField path="ingester.input.pattern" type="string" default="*.pb.enc">
+  File pattern to match (encrypted protobuf)
+</ParamField>
+
+<ParamField path="ingester.input.encrypted" type="boolean" default="true">
+  Files are encrypted (ChaCha20-Poly1305)
+</ParamField>
+
+<ParamField path="ingester.input.compressed" type="boolean" default="true">
+  Files are compressed (LZ4)
+</ParamField>
+
+### Embedders
+
+<ParamField path="ingester.embedders.chronos.enabled" type="boolean" default="true">
+  Enable Chronos temporal embeddings
+</ParamField>
+
+<ParamField path="ingester.embedders.chronos.onnx_path" type="string" default="/vagrant/rag-ingester/models/onnx/chronos.onnx">
+  ONNX model path
+</ParamField>
+
+<ParamField path="ingester.embedders.chronos.input_dim" type="integer" default="83">
+  Input feature dimension
+</ParamField>
+
+<ParamField path="ingester.embedders.chronos.output_dim" type="integer" default="512">
+  Embedding dimension
+</ParamField>
+
+### FAISS Configuration
+
+<ParamField path="ingester.faiss.index_type" type="string" default="Flat">
+  FAISS index type: `Flat`, `IVF`, `HNSW`
+</ParamField>
+
+<ParamField path="ingester.faiss.metric" type="string" default="L2">
+  Distance metric: `L2`, `IP` (inner product)
+</ParamField>
+
+<ParamField path="ingester.faiss.persist_path" type="string" default="/shared/faiss_indexes">
+  Directory for persistent FAISS indexes
+</ParamField>
+
+<ParamField path="ingester.faiss.checkpoint_interval_events" type="integer" default="1000">
+  Save index every N events
+</ParamField>
+
+---
+
+## Example Configurations
+
+### Production Firewall Config
+
+```json Production firewall.json
+{
+  "ipsets": {
+    "blacklist": {
+      "set_name": "ml_defender_blacklist_prod",
+      "max_elements": 10000,
+      "timeout": 7200,
+      "hash_size": 4096
+    }
+  },
+  "batch_processor": {
+    "batch_size_threshold": 50,
+    "min_confidence": 0.7
+  },
+  "logging": {
+    "level": "info",
+    "file": "/var/log/ml-defender/firewall.log"
+  },
+  "metrics": {
+    "export_interval_sec": 60
+  }
+}
+```
+
+### Gateway Mode Sniffer Config
+
+```json Gateway sniffer.json
+{
+  "deployment": {
+    "mode": "dual",
+    "host_interface": {
+      "name": "eth0",
+      "xdp_mode": "native"
+    },
+    "gateway_interface": {
+      "name": "eth1",
+      "xdp_mode": "native",
+      "promiscuous": true
+    },
+    "network_settings": {
+      "enable_ip_forwarding": true,
+      "enable_nat": true
+    }
+  },
+  "profile": "dual_nic"
+}
+```
+
+### Conservative ML Thresholds
+
+```json ml_detector_config.json
+{
+  "ml": {
+    "thresholds": {
+      "level1_attack": 0.8,
+      "level2_ddos": 0.85,
+      "level2_ransomware": 0.9,
+      "level3_web": 0.75,
+      "level3_internal": 0.85
+    }
+  }
+}
+```
+
+---
+
+## Configuration Best Practices
+
+<Check>
+**Single Source of Truth**: Never hardcode values. All settings in JSON.
+</Check>
+
+<Check>
+**Test Before Production**: Validate configs in lab with `dry_run: true`
+</Check>
+
+<Check>
+**Monitor Metrics**: Always enable metrics export for capacity planning
+</Check>
+
+<Check>
+**IPSet Capacity**: Plan for 2x expected peak blocked IPs
+</Check>
+
+<Check>
+**Threshold Tuning**: Start conservative (0.8+), lower based on false positive rate
+</Check>
+
+---
+
+## Crypto Seed Exchange
+
+ML Defender uses ChaCha20-Poly1305 authenticated encryption for all inter-component communication.
+
+### How It Works
+
+1. **ml-detector** generates a random 256-bit key on startup
+2. Key is stored in etcd at `/crypto/ml-detector/tokens`
+3. **firewall-acl-agent** reads key from etcd at `/crypto/firewall/tokens`
+4. Both components use the same key for encryption/decryption
+5. Keys rotate every 24 hours (configurable)
+
+### Verify Crypto Sync
+
+```bash
+# Check etcd keys
+etcdctl get --prefix /crypto
+
+# Should show:
+# /crypto/ml-detector/tokens: <base64-encoded-key>
+# /crypto/firewall/tokens: <base64-encoded-key>
+```
+
+### Manual Key Rotation
+
+```bash
+# Restart ml-detector to generate new key
+sudo pkill ml-detector
+cd ml-detector/build && ./ml-detector -c ../config/ml_detector_config.json
+
+# Restart firewall-agent to sync new key
+sudo pkill firewall-acl-agent
+cd firewall-acl-agent/build && sudo ./firewall-acl-agent -c ../config/firewall.json
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Launch ML Defender with default configs
+  </Card>
+  <Card title="Deployment" icon="server" href="/deployment">
+    Production deployment strategies
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/monitoring">
+    Metrics, alerts, and observability
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>

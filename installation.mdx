@@ -1,0 +1,639 @@
+---
+title: 'Installation'
+description: 'Complete installation guide for ML Defender infrastructure'
+icon: 'download'
+---
+
+## System Requirements
+
+### Minimum Requirements (Testing)
+
+- **CPU**: 4 cores @ 2.0 GHz
+- **RAM**: 8 GB
+- **Storage**: 20 GB available
+- **Network**: Single 1GbE NIC
+- **OS**: Debian 12 (Bookworm) or Ubuntu 22.04+
+- **Kernel**: 6.1.0+ (for eBPF/XDP support)
+
+### Recommended (Production)
+
+- **CPU**: 8+ cores @ 3.0 GHz
+- **RAM**: 16 GB (32 GB for high-throughput)
+- **Storage**: 100 GB SSD
+- **Network**: Dual 10GbE NICs (Intel X710, Mellanox ConnectX-5)
+- **OS**: Debian 12 (Bookworm)
+- **Kernel**: 6.1.0+
+
+<Info>
+**Hardware Recommendations:**
+- **Testing**: Intel NUC, x86 Mini PC (N100/N305)
+- **Production**: Supermicro 1U, Dell PowerEdge R240
+- **Avoid**: Raspberry Pi (insufficient performance for 1Gbps+)
+</Info>
+
+### Kernel Version Check
+
+Verify your kernel version supports eBPF:
+
+```bash
+uname -r
+# Required: 6.1.0 or higher
+
+# Check eBPF support
+ls /sys/fs/bpf
+# Should exist for eBPF support
+```
+
+---
+
+## Installation Methods
+
+<CardGroup cols={3}>
+  <Card title="From Source" icon="code">
+    Recommended for development and customization
+  </Card>
+  <Card title="Vagrant" icon="box">
+    Pre-configured VM for rapid testing
+  </Card>
+  <Card title="Docker" icon="docker">
+    Containerized deployment (limited eBPF support)
+  </Card>
+</CardGroup>
+
+---
+
+## Method 1: Install from Source
+
+### Step 1: Install Build Dependencies
+
+<CodeGroup>
+```bash Debian/Ubuntu
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential cmake git \
+    libzmq3-dev libprotobuf-dev protobuf-compiler \
+    libjsoncpp-dev libssl-dev liblz4-dev \
+    libgrpc++-dev libetcd-cpp-api-dev \
+    ipset iptables python3 python3-pip
+
+# Kernel headers for eBPF
+sudo apt-get install -y linux-headers-$(uname -r)
+```
+
+```bash eBPF Toolchain
+# eBPF/XDP development tools
+sudo apt-get install -y \
+    clang llvm bpftool \
+    libelf-dev zlib1g-dev pkg-config
+```
+
+```bash Optional Dependencies
+# Testing and monitoring tools
+sudo apt-get install -y \
+    hping3 nmap tcpreplay \
+    netcat-openbsd iperf3 \
+    tcpdump net-tools
+```
+</CodeGroup>
+
+### Step 2: Install libbpf 1.4.6+
+
+ML Defender requires libbpf 1.4.6 or higher:
+
+```bash
+# Check current version
+pkg-config --modversion libbpf
+
+# If version < 1.4.6, build from source:
+cd /tmp
+git clone --depth 1 --branch v1.4.6 https://github.com/libbpf/libbpf.git
+cd libbpf/src
+make -j$(nproc) BUILD_STATIC_ONLY=y
+sudo make install install_headers
+sudo ldconfig
+
+# Verify installation
+pkg-config --modversion libbpf
+# Should show: 1.4.6
+```
+
+### Step 3: Install CMake 3.25+
+
+```bash
+# Check version
+cmake --version
+
+# If version < 3.25, install from binary:
+cd /tmp
+wget https://github.com/Kitware/CMake/releases/download/v3.25.0/cmake-3.25.0-linux-x86_64.sh
+sudo sh cmake-3.25.0-linux-x86_64.sh --prefix=/usr/local --skip-license
+rm cmake-3.25.0-linux-x86_64.sh
+
+# Verify
+cmake --version
+```
+
+### Step 4: Install ONNX Runtime 1.17.1
+
+Required for ML model inference:
+
+```bash
+cd /tmp
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.1.tgz
+tar -xzf onnxruntime-linux-x64-1.17.1.tgz
+
+# Install headers and libraries
+sudo cp -r onnxruntime-linux-x64-1.17.1/include/* /usr/local/include/
+sudo cp -r onnxruntime-linux-x64-1.17.1/lib/* /usr/local/lib/
+
+# Create lib64 symlinks for compatibility
+sudo mkdir -p /usr/local/lib64
+sudo ln -sf /usr/local/lib/libonnxruntime.so* /usr/local/lib64/
+sudo ln -sf /usr/local/lib/libonnxruntime_providers_shared.so /usr/local/lib64/
+
+# Update library cache
+sudo ldconfig
+
+# Verify
+ls -lh /usr/local/lib/libonnxruntime.so
+```
+
+### Step 5: Install etcd-cpp-api
+
+For distributed configuration:
+
+```bash
+cd /tmp
+git clone https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git
+cd etcd-cpp-apiv3 && git checkout v0.15.3
+
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+
+### Step 6: Install FAISS 1.8.0 (Optional, for RAG)
+
+Required only if using RAG ingestion:
+
+```bash
+# Install dependencies
+sudo apt-get install -y libblas-dev liblapack-dev
+
+# Build FAISS
+cd /tmp
+git clone --depth 1 --branch v1.8.0 https://github.com/facebookresearch/faiss.git
+cd faiss && mkdir build && cd build
+
+cmake .. \
+  -DFAISS_ENABLE_GPU=OFF \
+  -DFAISS_ENABLE_PYTHON=OFF \
+  -DBUILD_TESTING=OFF \
+  -DBUILD_SHARED_LIBS=ON \
+  -DCMAKE_BUILD_TYPE=Release
+
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+
+# Verify
+ls -lh /usr/local/lib/libfaiss.so
+```
+
+### Step 7: Clone and Build ML Defender
+
+```bash
+# Clone repository
+git clone https://github.com/yourusername/ml-defender.git
+cd ml-defender
+
+# Generate protobuf files
+cd protobuf && ./generate.sh
+
+# Build firewall-acl-agent
+cd ../firewall-acl-agent && mkdir -p build && cd build
+cmake .. && make -j$(nproc)
+
+# Build ml-detector
+cd ../../ml-detector && mkdir -p build && cd build
+cmake .. && make -j$(nproc)
+
+# Build sniffer
+cd ../../sniffer && make
+
+# Build etcd-server
+cd ../etcd-server && mkdir -p build && cd build
+cmake .. && make -j$(nproc)
+
+# Build tools
+cd ../../tools && mkdir -p build && cd build
+cmake .. && make -j$(nproc)
+```
+
+### Step 8: Configure System Settings
+
+```bash
+# Enable IP forwarding (for gateway mode)
+sudo sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+
+# Disable rp_filter (prevents routing issues)
+sudo sysctl -w net.ipv4.conf.all.rp_filter=0
+echo "net.ipv4.conf.all.rp_filter=0" | sudo tee -a /etc/sysctl.conf
+
+# Enable eBPF JIT
+sudo sysctl -w net.core.bpf_jit_enable=1
+echo "net.core.bpf_jit_enable=1" | sudo tee -a /etc/sysctl.conf
+
+# Mount BPF filesystem
+sudo mount -t bpf none /sys/fs/bpf
+echo "none /sys/fs/bpf bpf defaults 0 0" | sudo tee -a /etc/fstab
+```
+
+### Step 9: Create Directory Structure
+
+```bash
+# Log directories
+sudo mkdir -p /var/log/ml-defender
+sudo mkdir -p /vagrant/logs/lab
+sudo mkdir -p /vagrant/logs/rag
+
+# Model directories
+mkdir -p ml-detector/models/production/{level1,level2,level3}
+
+# Set permissions
+sudo chown -R $USER:$USER /var/log/ml-defender
+chmod 755 /var/log/ml-defender
+```
+
+<Check>
+Installation from source complete! Proceed to [Configuration](/configuration) to set up components.
+</Check>
+
+---
+
+## Method 2: Vagrant Deployment
+
+Vagrant provides a pre-configured VM with all dependencies installed.
+
+### Prerequisites
+
+- VirtualBox 7.0+
+- Vagrant 2.3+
+- 16GB RAM available on host
+- 50GB disk space
+
+### Install Vagrant
+
+<CodeGroup>
+```bash macOS
+brew install --cask virtualbox
+brew install --cask vagrant
+```
+
+```bash Linux
+# Install VirtualBox
+sudo apt-get install virtualbox
+
+# Install Vagrant
+wget https://releases.hashicorp.com/vagrant/2.4.0/vagrant_2.4.0-1_amd64.deb
+sudo dpkg -i vagrant_2.4.0-1_amd64.deb
+```
+
+```bash Windows
+# Download and install:
+# - VirtualBox: https://www.virtualbox.org/wiki/Downloads
+# - Vagrant: https://www.vagrantup.com/downloads
+```
+</CodeGroup>
+
+### Launch VM
+
+```bash
+# Clone repository
+git clone https://github.com/yourusername/ml-defender.git
+cd ml-defender
+
+# Start defender VM only (development)
+vagrant up defender
+
+# Or start both VMs (gateway testing)
+vagrant up defender client
+
+# SSH into VM
+vagrant ssh defender
+```
+
+### VM Configuration
+
+The Vagrantfile configures:
+
+- **defender VM**:
+  - 8GB RAM, 6 CPUs
+  - eth1: 192.168.56.20 (WAN-facing, host-based IDS)
+  - eth2: 192.168.100.1 (LAN-facing, gateway mode)
+  - All dependencies pre-installed
+  - Components pre-built
+
+- **client VM** (optional):
+  - 1GB RAM, 2 CPUs
+  - eth1: 192.168.100.50
+  - Traffic generation tools
+
+### Network Topology
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  HOST (macOS/Linux/Windows)                                     │
+│                                                                 │
+│  ┌─────────────────────┐         ┌──────────────────────────┐ │
+│  │  DEFENDER VM        │         │  CLIENT VM               │ │
+│  │                     │         │                          │ │
+│  │  • ml-detector      │◄────────│  • Attack simulation     │ │
+│  │  • firewall-agent   │   LAN   │  • PCAP replay           │ │
+│  │  • etcd-server      │  eth2   │  • Traffic generation    │ │
+│  │                     │         │                          │ │
+│  │  eth1: 56.20        │         │  eth1: 100.50            │ │
+│  │  eth2: 100.1        │         │  Gateway: 100.1          │ │
+│  └─────────────────────┘         └──────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Pre-configured Aliases
+
+The VM includes helpful aliases:
+
+```bash
+# Build commands
+build-detector    # Rebuild ml-detector
+build-firewall    # Rebuild firewall-acl-agent
+build-sniffer     # Rebuild sniffer
+build-rag         # Rebuild RAG components
+
+# Run commands
+run-detector      # Start ml-detector
+run-firewall      # Start firewall-agent
+run-sniffer       # Start sniffer
+run-lab           # Start entire lab
+
+# Monitoring
+logs-firewall     # Tail firewall logs
+logs-detector     # Tail detector logs
+logs-lab          # Monitor all logs
+status-lab        # Check running processes
+
+# Testing
+test-gateway      # Validate gateway mode
+gateway-dash      # Live monitoring dashboard
+```
+
+<Info>
+Vagrant deployment is ideal for testing and development. For production, use installation from source or Docker.
+</Info>
+
+---
+
+## Method 3: Docker Deployment
+
+Docker provides containerized deployment with service orchestration.
+
+<Warning>
+Docker has limited eBPF support. XDP features run in generic mode with reduced performance (~1-5 Mbps vs 1Gbps native).
+</Warning>
+
+### Prerequisites
+
+- Docker 24.0+
+- Docker Compose 2.0+
+
+### Launch Services
+
+```bash
+# Clone repository
+git clone https://github.com/yourusername/ml-defender.git
+cd ml-defender
+
+# Build and start all services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
+```
+
+### Service Architecture
+
+The `docker-compose.yaml` defines:
+
+```yaml
+services:
+  etcd:
+    - Port 2379 (client)
+    - Port 2380 (peer)
+    - Persistent volume for data
+
+  service1 (packet-sniffer):
+    - Port 5555 (ZMQ)
+    - Depends on etcd
+
+  service2 (feature-processor):
+    - Connects to service1
+    - Depends on etcd
+
+  service3 (consumer):
+    - Consumes processed events
+```
+
+### Network Configuration
+
+```yaml
+networks:
+  zeromq-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+```
+
+### Verify Services
+
+```bash
+# Check container status
+docker-compose ps
+
+# Test etcd connectivity
+docker exec -it etcd etcdctl endpoint health
+
+# View service logs
+docker-compose logs etcd
+docker-compose logs service1
+```
+
+---
+
+## Method 4: Debian Package Installation
+
+ML Defender provides .deb packages for Debian/Ubuntu systems.
+
+### Install Package
+
+```bash
+# Download package
+wget https://github.com/yourusername/ml-defender/releases/download/v1.0.0/sniffer-ebpf_1.0.0_amd64.deb
+
+# Install
+sudo dpkg -i sniffer-ebpf_1.0.0_amd64.deb
+
+# Install dependencies if missing
+sudo apt-get install -f
+```
+
+### Package Contents
+
+The package includes:
+
+- `/usr/local/bin/sniffer` - eBPF sniffer binary
+- `/etc/ml-defender/sniffer.json` - Configuration
+- `/usr/lib/systemd/system/sniffer-ebpf.service` - systemd service
+- `/var/log/ml-defender/` - Log directory
+
+### Service Management
+
+```bash
+# Enable on boot
+sudo systemctl enable sniffer-ebpf
+
+# Start service
+sudo systemctl start sniffer-ebpf
+
+# Check status
+sudo systemctl status sniffer-ebpf
+
+# View logs
+sudo journalctl -u sniffer-ebpf -f
+```
+
+---
+
+## Network Interface Setup
+
+### Single NIC (Host-Based IDS)
+
+Protects only the host system:
+
+```bash
+# Enable promiscuous mode
+sudo ip link set eth0 promisc on
+
+# Disable offloading features
+sudo ethtool -K eth0 gro off tso off gso off
+
+# Verify
+ip link show eth0 | grep PROMISC
+```
+
+### Dual NIC (Gateway Mode)
+
+Inspects transit traffic between networks:
+
+```bash
+# Configure WAN interface (eth1)
+sudo ip link set eth1 up
+sudo ip link set eth1 promisc on
+sudo ethtool -K eth1 gro off tso off gso off
+
+# Configure LAN interface (eth2)
+sudo ip link set eth2 up
+sudo ip link set eth2 promisc on
+sudo ethtool -K eth2 gro off tso off gso off
+
+# Enable NAT/MASQUERADE
+sudo iptables -t nat -A POSTROUTING -o eth1 -j MASQUERADE
+sudo iptables -A FORWARD -i eth2 -o eth1 -j ACCEPT
+sudo iptables -A FORWARD -i eth1 -o eth2 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# Verify
+ip link show eth1 | grep PROMISC
+ip link show eth2 | grep PROMISC
+```
+
+### eBPF XDP Mode
+
+XDP can run in three modes:
+
+1. **Native** (best performance, requires driver support):
+   ```bash
+   # Loaded directly in NIC driver
+   # ~10-20 Gbps throughput
+   ```
+
+2. **Offloaded** (SmartNIC only):
+   ```bash
+   # Runs on NIC hardware
+   # ~40+ Gbps throughput
+   ```
+
+3. **Generic/SKB** (fallback, lowest performance):
+   ```bash
+   # Runs in kernel network stack
+   # ~1-5 Mbps throughput (VirtualBox)
+   ```
+
+ML Defender auto-detects the best available mode.
+
+---
+
+## Post-Installation
+
+### Verify Installation
+
+<Steps>
+  <Step title="Check Binaries">
+    ```bash
+    which firewall-acl-agent
+    which ml-detector
+    which sniffer
+    which etcd_server
+    ```
+  </Step>
+
+  <Step title="Check Dependencies">
+    ```bash
+    pkg-config --modversion libbpf      # >= 1.4.6
+    cmake --version                     # >= 3.25
+    ls /usr/local/lib/libonnxruntime.so # ONNX Runtime
+    ls /usr/local/lib/libfaiss.so       # FAISS (optional)
+    ```
+  </Step>
+
+  <Step title="Test eBPF Support">
+    ```bash
+    sudo bpftool prog list
+    sudo bpftool map list
+    ls /sys/fs/bpf
+    ```
+  </Step>
+
+  <Step title="Verify Network Config">
+    ```bash
+    sysctl net.ipv4.ip_forward          # Should be 1
+    sysctl net.core.bpf_jit_enable      # Should be 1
+    ip link show | grep PROMISC         # Check interfaces
+    ```
+  </Step>
+</Steps>
+
+### Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Configure components, IPSet capacity, and detection thresholds
+  </Card>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Start the system and run your first detection
+  </Card>
+</CardGroup>

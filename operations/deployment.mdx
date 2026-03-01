@@ -1,0 +1,587 @@
+---
+title: Deployment Guide
+description: Deploy ML Defender using Vagrant, Docker Compose, or Debian packages
+---
+
+ML Defender supports three deployment methods: Vagrant multi-VM (development/testing), Docker Compose (containerized), and Debian packages (production). This guide covers network topology, service dependencies, and health verification.
+
+## Network Topology
+
+ML Defender operates in two modes:
+
+### Host-Based IDS Mode
+
+```
+┌─────────────────────────────────────────┐
+│  Host (192.168.56.20)                   │
+│                                         │
+│  ┌──────────────────────────────────┐  │
+│  │  eBPF/XDP Sniffer                │  │
+│  │  (eth1: monitoring interface)     │  │
+│  └──────────────────────────────────┘  │
+│           ↓ ZMQ :5571                   │
+│  ┌──────────────────────────────────┐  │
+│  │  ML Detector (4x RandomForest)    │  │
+│  └──────────────────────────────────┘  │
+│           ↓ ZMQ :5572                   │
+│  ┌──────────────────────────────────┐  │
+│  │  Firewall ACL Agent               │  │
+│  │  (IPSet/IPTables)                 │  │
+│  └──────────────────────────────────┘  │
+└─────────────────────────────────────────┘
+```
+
+### Gateway Mode (Dual-NIC)
+
+```
+┌──────────────────────────────────────────┐
+│  ML Defender Gateway                     │
+│                                          │
+│  eth1: 192.168.56.20 (WAN-facing)        │
+│  eth3: 192.168.100.1 (LAN-facing)        │
+│                                          │
+│  ┌────────────────────────────────────┐ │
+│  │  IP Forwarding: Enabled            │ │
+│  │  NAT/MASQUERADE: eth3 → eth1       │ │
+│  │  Promiscuous Mode: eth1, eth3      │ │
+│  └────────────────────────────────────┘ │
+│                                          │
+│  ┌────────────────────────────────────┐ │
+│  │  eBPF/XDP Sniffer (eth3)           │ │
+│  └────────────────────────────────────┘ │
+│           ↓                              │
+│  ┌────────────────────────────────────┐ │
+│  │  ML Detector + Firewall            │ │
+│  └────────────────────────────────────┘ │
+└──────────────────────────────────────────┘
+         ↑                ↓
+    LAN Clients      Internet
+  (192.168.100.x)  (via eth1)
+```
+
+## Vagrant Multi-VM Deployment
+
+<Info>Recommended for development, testing, and gateway mode validation.</Info>
+
+### Prerequisites
+
+```bash
+# Install Vagrant and VirtualBox
+sudo apt-get install -y vagrant virtualbox
+
+# Verify installation
+vagrant --version
+virtualbox --version
+```
+
+### Deployment Steps
+
+<Steps>
+  <Step title="Clone repository">
+    ```bash
+    git clone https://github.com/ml-defender/aegisIDS.git
+    cd aegisIDS
+    ```
+  </Step>
+
+  <Step title="Start Defender VM (development mode)">
+    ```bash
+    # Start only the defender VM
+    vagrant up defender
+
+    # SSH into the VM
+    vagrant ssh defender
+    ```
+
+    The Vagrantfile.multi-vm provisions:
+    - Debian Bookworm 12 (8GB RAM, 6 CPUs)
+    - Dual-NIC configuration (eth1: WAN, eth3: LAN)
+    - IP forwarding and NAT for gateway mode
+    - All dependencies (eBPF, ONNX Runtime, etcd, llama.cpp)
+    - Pre-built components
+  </Step>
+
+  <Step title="Start Client VM (gateway testing)">
+    ```bash
+    # Start both VMs for gateway mode testing
+    vagrant up defender client
+
+    # SSH into client VM
+    vagrant ssh client
+    ```
+
+    The client VM:
+    - IP: 192.168.100.50
+    - Gateway: 192.168.100.1 (defender eth3)
+    - Includes attack simulation tools (hping3, nmap, tcpreplay)
+  </Step>
+
+  <Step title="Verify network configuration">
+    ```bash
+    # On defender VM
+    vagrant ssh defender
+
+    # Check IP forwarding
+    sysctl net.ipv4.ip_forward  # Should be 1
+
+    # Check interfaces
+    ip addr show | grep -E "eth[0-9]"
+    # eth0: NAT (Vagrant management)
+    # eth1: 192.168.56.20 (WAN-facing)
+    # eth3: 192.168.100.1 (LAN-facing)
+
+    # Check promiscuous mode
+    ip link show eth1 | grep PROMISC
+    ip link show eth3 | grep PROMISC
+
+    # Check NAT rules
+    sudo iptables -t nat -L POSTROUTING -n
+    ```
+  </Step>
+
+  <Step title="Build components">
+    ```bash
+    # Inside defender VM
+    cd /vagrant
+
+    # Build all components
+    ./scripts/build_all.sh
+
+    # Or build individually
+    build-sniffer    # Alias: cd sniffer && make
+    build-detector   # Alias: cmake + make
+    build-firewall   # Alias: cmake + make
+    build-rag        # Alias: cmake + make
+    ```
+  </Step>
+
+  <Step title="Start the pipeline">
+    ```bash
+    # Automated startup (recommended)
+    run-lab  # Alias for scripts/run_lab_dev.sh
+
+    # Manual startup (for debugging)
+    # Terminal 1: Firewall (SUB - start first)
+    run-firewall
+
+    # Terminal 2: Detector (PUB - start second)
+    run-detector
+
+    # Terminal 3: Sniffer (PUSH - start last)
+    run-sniffer
+    ```
+  </Step>
+</Steps>
+
+### Service Startup Order
+
+<Warning>Components must start in this order due to ZMQ socket binding:</Warning>
+
+1. **Firewall ACL Agent** (SUB socket on :5572) - Must bind first
+2. **ML Detector** (PUB socket on :5572) - Connects to firewall
+3. **Sniffer** (PUSH socket to :5571) - Sends to detector
+
+The `run_lab_dev.sh` script handles this automatically:
+
+```bash source/scripts/run_lab_dev.sh
+# Firewall starts first (binds :5572)
+sudo ./firewall-acl-agent -c ../config/firewall.json &
+sleep 3
+
+# Detector starts second (connects to :5572, binds :5571)
+./ml-detector -c ../config/ml_detector_config.json &
+sleep 2
+
+# Sniffer starts last (connects to :5571)
+sudo ./sniffer -c ../config/sniffer.json &
+```
+
+## Docker Compose Deployment
+
+<Info>Recommended for containerized environments and CI/CD pipelines.</Info>
+
+### Prerequisites
+
+```bash
+# Install Docker and Docker Compose
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+sudo usermod -aG docker $USER
+
+# Install Docker Compose
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+```
+
+### Deployment Steps
+
+<Steps>
+  <Step title="Configure services">
+    Review `docker-compose.yaml`:
+
+    ```yaml source/docker-compose.yaml
+    services:
+      etcd:
+        image: quay.io/coreos/etcd:v3.5.9
+        ports:
+          - "2379:2379"
+          - "2380:2380"
+        networks:
+          - zeromq-net
+        healthcheck:
+          test: ["/usr/local/bin/etcd", "--version"]
+          interval: 10s
+
+      service1:  # Packet Sniffer
+        build:
+          context: .
+          dockerfile: Dockerfile.service1
+        environment:
+          - NODE_ID=service1_node_001
+          - ETCD_ENDPOINTS=http://etcd:2379
+        depends_on:
+          etcd:
+            condition: service_healthy
+
+      service2:  # Feature Processor
+        build:
+          context: .
+          dockerfile: Dockerfile.service2
+        depends_on:
+          etcd:
+            condition: service_healthy
+          service1:
+            condition: service_healthy
+        command: >
+          sh -c "sleep 8 && /usr/local/bin/service2_exe"
+    ```
+  </Step>
+
+  <Step title="Build images">
+    ```bash
+    # Build all services
+    docker-compose build
+
+    # Build with verbose output (debugging)
+    docker-compose build --progress=plain
+    ```
+  </Step>
+
+  <Step title="Start services">
+    ```bash
+    # Start all services
+    docker-compose up -d
+
+    # Start with logs visible
+    docker-compose up
+
+    # Start specific services
+    docker-compose up etcd service1
+    ```
+  </Step>
+
+  <Step title="Verify deployment">
+    ```bash
+    # Check running containers
+    docker-compose ps
+
+    # Check logs
+    docker-compose logs -f service1
+    docker-compose logs --tail=50 service2
+
+    # Check network connectivity
+    docker network ls | grep zeromq
+    docker network inspect ml-defender_zeromq-net
+    ```
+  </Step>
+</Steps>
+
+### Health Checks
+
+All services include health checks:
+
+```bash
+# Check individual service health
+docker-compose ps
+# Status column shows "healthy" when ready
+
+# Manual health check
+docker exec service1 nc -z localhost 5555
+
+# Check etcd health
+docker exec etcd /usr/local/bin/etcdctl endpoint health
+```
+
+## Debian Package Deployment
+
+<Info>Recommended for production deployments on Debian/Ubuntu servers.</Info>
+
+### Package Information
+
+ML Defender provides a `sniffer-ebpf` package:
+
+```bash source/debian/control
+Package: sniffer-ebpf
+Architecture: amd64
+Depends: libbpf1 (>= 1:1.0),
+         libprotobuf-c1 (>= 1.4),
+         liblz4-1 (>= 1.9),
+         libzmq5 (>= 4.3)
+Description: eBPF-based network packet sniffer with ML features
+ Features:
+  - Kernel-level packet capture with eBPF
+  - 83 network features extraction
+  - Protobuf serialization with LZ4 compression
+  - ZMQ distributed pipeline
+  - Systemd integration
+```
+
+### Build Package
+
+<Steps>
+  <Step title="Install build dependencies">
+    ```bash
+    sudo apt-get install -y debhelper-compat \
+      libbpf-dev libprotobuf-c-dev liblz4-dev libzmq3-dev \
+      clang llvm linux-headers-generic \
+      protobuf-c-compiler pkg-config cmake
+    ```
+  </Step>
+
+  <Step title="Build Debian package">
+    ```bash
+    cd source/
+
+    # Build package
+    dpkg-buildpackage -b -uc -us
+
+    # Package will be created in parent directory
+    ls ../*.deb
+    # sniffer-ebpf_1.0-1_amd64.deb
+    ```
+  </Step>
+
+  <Step title="Install package">
+    ```bash
+    # Install package
+    sudo dpkg -i ../sniffer-ebpf_1.0-1_amd64.deb
+
+    # Install missing dependencies (if any)
+    sudo apt-get install -f
+
+    # Verify installation
+    dpkg -L sniffer-ebpf
+    systemctl status sniffer-ebpf
+    ```
+  </Step>
+
+  <Step title="Configure service">
+    ```bash
+    # Edit configuration
+    sudo vim /etc/sniffer-ebpf/config.json
+
+    # Enable and start service
+    sudo systemctl enable sniffer-ebpf
+    sudo systemctl start sniffer-ebpf
+
+    # Check status
+    sudo systemctl status sniffer-ebpf
+    sudo journalctl -u sniffer-ebpf -f
+    ```
+  </Step>
+</Steps>
+
+### Systemd Service
+
+The package includes a systemd service unit:
+
+```ini source/debian/sniffer-ebpf.service
+[Unit]
+Description=eBPF Network Packet Sniffer with ML Features
+Documentation=https://github.com/alonsoir/test-zeromq-c-
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/sniffer_ebpf -c /etc/sniffer-ebpf/config.json --verbose
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_BPF CAP_SYS_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_BPF CAP_SYS_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log
+
+# Resource limits
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Health Checks and Verification
+
+### Component Status
+
+```bash
+# Check all components
+pgrep -a firewall-acl-agent
+pgrep -a ml-detector
+pgrep -a sniffer
+pgrep -a rag-security
+pgrep -a etcd-server
+
+# Or use alias (Vagrant)
+status-lab
+```
+
+### Port Verification
+
+```bash
+# Check ZMQ ports
+ss -tlnp | grep 5571  # Sniffer → Detector
+ss -tlnp | grep 5572  # Detector → Firewall
+ss -tlnp | grep 2379  # etcd client
+ss -tlnp | grep 2380  # etcd peer
+```
+
+### IPSet Verification
+
+```bash
+# Check IPSet exists and is active
+sudo ipset list ml_defender_blacklist_test
+
+# Expected output:
+Name: ml_defender_blacklist_test
+Type: hash:ip
+Revision: 4
+Header: family inet hashsize 1024 maxelem 1000 timeout 3600
+Size in memory: 528
+References: 1
+Number of entries: 0
+
+# Check IPSet is referenced by iptables
+sudo iptables -L ML_DEFENDER_TEST -n -v
+```
+
+### Log Verification
+
+```bash
+# Check logs for errors
+tail -f /vagrant/logs/lab/firewall.log
+tail -f /vagrant/logs/lab/detector.log
+tail -f /vagrant/logs/lab/sniffer.log
+
+# Or use aliases (Vagrant)
+logs-firewall
+logs-detector
+logs-sniffer
+logs-lab  # All logs with live monitoring
+```
+
+### Pipeline Verification
+
+```bash
+# Check sniffer is sending packets
+grep "Paquetes enviados" /vagrant/logs/lab/sniffer.log | tail -5
+
+# Check detector is processing
+grep "Stats:" /vagrant/logs/lab/detector.log | tail -5
+
+# Check firewall is receiving
+grep "Received" /vagrant/logs/lab/firewall.log | tail -5
+```
+
+### Performance Verification
+
+```bash
+# Check CPU and memory usage
+top -b -n 1 | grep -E "(sniffer|ml-detector|firewall)"
+
+# Check detailed stats
+ps aux | grep -E "(sniffer|ml-detector|firewall)" | awk '{print $2, $3, $4, $6, $11}'
+# PID  %CPU  %MEM  RSS(KB)  COMMAND
+```
+
+### Network Capture Verification
+
+```bash
+# Check eBPF program is loaded
+sudo bpftool prog list | grep sniffer
+
+# Check interface is in promiscuous mode
+ip link show eth1 | grep PROMISC
+
+# Test packet capture
+sudo tcpdump -i eth1 -c 10
+```
+
+## Stopping and Cleanup
+
+### Vagrant
+
+```bash
+# Stop VMs
+vagrant halt defender client
+
+# Destroy VMs
+vagrant destroy -f defender client
+
+# Stop components only (keep VMs running)
+kill-lab  # Alias for pkill commands
+```
+
+### Docker Compose
+
+```bash
+# Stop services
+docker-compose stop
+
+# Remove containers
+docker-compose down
+
+# Remove containers and volumes
+docker-compose down -v
+
+# Full cleanup
+docker-compose down && docker system prune -af
+```
+
+### Debian Package
+
+```bash
+# Stop service
+sudo systemctl stop sniffer-ebpf
+
+# Disable service
+sudo systemctl disable sniffer-ebpf
+
+# Remove package
+sudo apt-get remove sniffer-ebpf
+
+# Purge (removes config files)
+sudo apt-get purge sniffer-ebpf
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Set up monitoring and observability
+  </Card>
+  <Card title="Performance Tuning" icon="gauge-high" href="/operations/performance-tuning">
+    Optimize for your workload
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Diagnose and fix issues
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration/overview">
+    Configure components
+  </Card>
+</CardGroup>

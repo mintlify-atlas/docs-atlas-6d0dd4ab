@@ -1,0 +1,447 @@
+---
+title: "Testing Guide"
+description: "Comprehensive testing strategy for ML Defender components"
+icon: "flask"
+---
+
+## Test Suite Overview
+
+ML Defender employs a **multi-layered testing strategy** validated with real-world datasets and stress testing.
+
+<CardGroup cols={3}>
+  <Card title="Unit Tests" icon="vial">
+    25+ tests covering core algorithms
+  </Card>
+  <Card title="Integration Tests" icon="link">
+    End-to-end pipeline validation
+  </Card>
+  <Card title="Stress Tests" icon="gauge-high">
+    36K+ events, 17-hour stability
+  </Card>
+</CardGroup>
+
+---
+
+## Test Structure
+
+### Unit Tests
+
+Located in `*/tests/` directories:
+
+```bash
+sniffer/tests/
+├── test_payload_analyzer.cpp      # Shannon entropy, PE detection
+├── test_fast_detector.cpp         # Layer 1 heuristics
+├── test_ransomware_processor.cpp  # Layer 2 features
+└── test_integration_simple.cpp    # End-to-end flow
+
+ml-detector/tests/
+├── test_onnx_inference.cpp        # Model loading
+├── test_feature_extraction.cpp    # 83-feature pipeline
+└── test_zmq_consumer.cpp          # Message handling
+
+firewall-acl-agent/tests/
+├── test_crypto_decrypt.cpp        # ChaCha20-Poly1305
+├── test_ipset_manager.cpp         # IPSet operations
+└── test_batch_processor.cpp       # Queue management
+```
+
+### Integration Tests
+
+```bash
+scripts/verify_rag_ecosystem.sh    # Full pipeline
+scripts/verify_encryption.sh       # Crypto validation
+scripts/verify_firewall_complete.sh # Firewall integration
+```
+
+---
+
+## Running Tests
+
+### Quick Unit Tests
+
+```bash
+# Build with tests
+make PROFILE=debug sniffer
+
+# Run all tests
+cd sniffer/build-debug
+ctest --output-on-failure
+
+# Run specific test
+./test_payload_analyzer
+```
+
+### All Components
+
+<CodeGroup>
+```bash Sniffer Tests
+cd sniffer/build-debug
+ctest --output-on-failure
+
+# Individual tests:
+./test_payload_analyzer
+./test_fast_detector
+./test_ransomware_feature_extractor
+./test_integration_simple_event
+```
+
+```bash ML Detector Tests
+cd ml-detector/build-debug
+ctest --output-on-failure
+
+# Model validation:
+./ml-detector --test-models
+```
+
+```bash Firewall Tests
+cd firewall-acl-agent/build-debug
+sudo ctest --output-on-failure  # Requires sudo for IPSet
+
+# Crypto validation:
+./test_crypto_decrypt
+```
+</CodeGroup>
+
+### With Valgrind (Leak Detection)
+
+```bash
+valgrind --leak-check=full \
+         --show-leak-kinds=all \
+         --track-origins=yes \
+         ./test_payload_analyzer
+```
+
+---
+
+## Stress Testing
+
+### 8-Hour Stability Test
+
+Validated with **36,000 events** across 4 progressive tests (source/stress_test_8h.sh).
+
+```bash
+# Full 8-hour test
+./stress_test_8h.sh
+
+# Monitor progress
+tail -f /vagrant/stress_test_*/logs/sniffer.log
+```
+
+**Test Phases** (from source/stress_test_8h.sh:575-613):
+
+1. **Warm-up** (30 min): Low load, gradual increase
+2. **Normal Load** (2 hours): Mixed protocols (HTTP/HTTPS/DNS)
+3. **Stress Testing** (1.5 hours): High bursts (50/s)
+4. **Ransomware Simulation** (1 hour): Suspicious patterns
+5. **Sustained Load** (3 hours): Continuous moderate traffic
+6. **Cool Down** (30 min): Gradual reduction
+
+### Stress Test Results (Day 52)
+
+**From source/README.md:179-203:**
+
+| Test | Events | Rate      | CPU    | Result |
+|------|--------|-----------|--------|--------|
+| 1    | 1,000  | 42.6/sec  | N/A    | ✅ PASS |
+| 2    | 5,000  | 94.9/sec  | N/A    | ✅ PASS |
+| 3    | 10,000 | 176.1/sec | 41-45% | ✅ PASS |
+| 4    | 20,000 | 364.9/sec | 49-54% | ✅ PASS |
+
+**Totals (36K events)**:
+```
+crypto_errors: 0              ← Perfect crypto pipeline
+decompression_errors: 0       ← Perfect LZ4 pipeline
+protobuf_parse_errors: 0      ← Perfect message parsing
+ipset_successes: 118          ← First ~1000 blocked
+max_queue_depth: 16,690       ← Backpressure handled
+```
+
+---
+
+## Synthetic Traffic Generation
+
+### Tools Available
+
+**From source/tools/:**
+
+```bash
+# Generate ML detector events
+cd tools/build-debug
+./synthetic_ml_output_injector 1000 50  # 1000 events, 50/sec
+
+# Generate sniffer events
+./synthetic_sniffer_injector --count 5000 --malicious-ratio 0.20
+
+# Generate full event pipeline
+./generate_synthetic_events 100 0.20  # 100 events, 20% malicious
+```
+
+### Traffic Profiles
+
+**Hospital Benchmark** (source/scripts/day11_hospital_benchmark/):
+
+```bash
+# Electronic Health Records load
+scripts/day11_hospital_benchmark/traffic_profiles/ehr_load.sh
+
+# Emergency department burst
+scripts/day11_hospital_benchmark/traffic_profiles/emergency_test.sh
+
+# PACS imaging traffic
+scripts/day11_hospital_benchmark/traffic_profiles/pacs_burst.sh
+```
+
+---
+
+## Validation Scripts
+
+### Crypto Pipeline Validation
+
+```bash
+scripts/verify_encryption.sh
+```
+
+Verifies:
+- ✅ ChaCha20-Poly1305 encryption/decryption
+- ✅ LZ4 compression/decompression
+- ✅ Protobuf serialization
+- ✅ Zero errors at 36K events
+
+### Firewall Integration
+
+```bash
+scripts/verify_firewall_complete.sh
+```
+
+Validates:
+- ✅ IPSet creation and rules
+- ✅ Event reception from ml-detector
+- ✅ Decryption and decompression
+- ✅ IP blocking via iptables
+
+### Full Ecosystem
+
+```bash
+scripts/verify_rag_ecosystem.sh
+```
+
+End-to-end test:
+1. Start etcd-server
+2. Start sniffer (eBPF capture)
+3. Start ml-detector (inference)
+4. Start firewall-acl-agent (blocking)
+5. Generate synthetic traffic
+6. Verify all components healthy
+
+---
+
+## Test Datasets
+
+### CTU-13 Neris Botnet
+
+**Used for ransomware detection validation** (source/README.md:289-292).
+
+```bash
+# Replay CTU-13 dataset
+make test-replay-neris
+
+# Manual replay
+sudo tcpreplay -i eth1 --mbps=10 \
+  datasets/ctu13/botnet-capture-20110810-neris.pcap
+```
+
+**Expected Results**:
+- 492K events processed
+- 97.6% ransomware detection accuracy
+- 0 crashes, 0 memory leaks
+
+### Dataset Structure
+
+```bash
+datasets/
+├── ctu13/
+│   ├── smallFlows.pcap          # Quick test (1K flows)
+│   ├── botnet-capture-neris.pcap # Ransomware (492K events)
+│   └── bigFlows.pcap            # Stress test (10M+ flows)
+└── synthetic/
+    ├── normal_traffic.pcap
+    └── ddos_simulation.pcap
+```
+
+---
+
+## Performance Benchmarks
+
+### 17-Hour Stability Test Results
+
+**From source/TESTING.md:164-182:**
+
+```
+Total Runtime:              17h 2m 10s (61,343 seconds)
+Total Packets Processed:    2,080,549
+Payloads Analyzed:          1,550,375 (74.5%)
+Peak Throughput:            82.35 events/second
+Average Throughput:         33.92 events/second
+Memory Footprint:           4.5 MB (STABLE)
+CPU Usage (load):           5-10%
+Kernel Panics:              0
+Memory Leaks:               0
+
+Status: ✅ PRODUCTION-READY
+```
+
+### Component Latency
+
+**From source/TESTING.md:282-296:**
+
+| Component | Latency | Notes |
+|-----------|---------|-------|
+| eBPF capture | &lt;1 μs | Kernel space |
+| Ring buffer | &lt;1 μs | Zero-copy |
+| PayloadAnalyzer (fast) | 1.01 μs | Normal traffic |
+| PayloadAnalyzer (slow) | 149.3 μs | Suspicious (entropy ≥ 7.0) |
+| FastDetector | &lt;1 μs | O(1) heuristics |
+| RansomwareProcessor | Async | Every 30s batch |
+| Protobuf serialize | ~10 μs | Per event |
+| ZMQ PUSH | ~50 μs | Network I/O |
+
+**End-to-end latency**:
+- Normal path: ~64 μs
+- Suspicious path: ~212 μs
+
+---
+
+## Coverage and CI/CD
+
+### Test Coverage Goals
+
+- **Unit tests**: &gt;80% code coverage
+- **Integration tests**: All critical paths
+- **Stress tests**: 24h+ continuous operation
+
+### Current Coverage
+
+**From source/TESTING.md:353-361:**
+
+| Test Suite | Tests | Status | Coverage |
+|------------|-------|--------|----------|
+| PayloadAnalyzer | 8 | ✅ All pass | Entropy, PE, patterns |
+| FastDetector | 5 | ✅ All pass | Heuristics, windows |
+| RansomwareProcessor | 7 | ✅ All pass | Features, aggregation |
+| Integration | 5 | ✅ All pass | End-to-end flow |
+| **Total** | **25** | **✅ 100%** | **Comprehensive** |
+
+### CI/CD Pipeline (Planned)
+
+```yaml .github/workflows/test.yml
+name: Test Suite
+
+on: [push, pull_request]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build
+        run: make PROFILE=debug all
+      - name: Run Tests
+        run: |
+          cd sniffer/build-debug && ctest --output-on-failure
+          cd ml-detector/build-debug && ctest --output-on-failure
+
+  stress-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1-hour stress test
+        run: ./stress_test_8h.sh
+        timeout-minutes: 70
+```
+
+---
+
+## Test-Driven Development
+
+### Writing New Tests
+
+**Example**: Adding a new feature to PayloadAnalyzer
+
+```cpp sniffer/tests/test_payload_analyzer.cpp
+#include <gtest/gtest.h>
+#include "payload_analyzer.hpp"
+
+TEST(PayloadAnalyzer, DetectsCryptoMiningStratum) {
+    PayloadAnalyzer analyzer;
+    std::string payload = "{\"id\":1,\"method\":\"mining.subscribe\"}";
+    
+    auto result = analyzer.analyze(
+        reinterpret_cast<const uint8_t*>(payload.data()),
+        payload.size()
+    );
+    
+    EXPECT_TRUE(result.is_suspicious);
+    EXPECT_GT(result.suspicious_strings, 0);
+    EXPECT_TRUE(result.has_crypto_pattern);
+}
+```
+
+### Test Naming Convention
+
+```
+test_<component>_<feature>.cpp
+TEST(<Component>, <BehaviorDescription>)
+```
+
+---
+
+## Debugging Failed Tests
+
+### Common Issues
+
+**Test fails intermittently**:
+```bash
+# Run test 100 times
+for i in {1..100}; do 
+  ./test_payload_analyzer || echo "FAILED at iteration $i"
+done
+```
+
+**Memory errors**:
+```bash
+# TSAN build
+make PROFILE=tsan sniffer
+cd sniffer/build-tsan
+TSAN_OPTIONS="history_size=7" ./test_payload_analyzer
+
+# ASAN build
+make PROFILE=asan sniffer
+cd sniffer/build-asan
+./test_payload_analyzer
+```
+
+**Performance regression**:
+```bash
+# Compare before/after
+hyperfine './build-debug/test_payload_analyzer' \
+          './build-production/test_payload_analyzer'
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Build System" icon="hammer" href="/dev/building">
+    Understand CMake and Makefile configuration
+  </Card>
+  <Card title="Stress Testing" icon="gauge-high" href="/advanced/stress-testing">
+    Deep dive into stress test methodology
+  </Card>
+  <Card title="eBPF/XDP" icon="network-wired" href="/advanced/ebpf-xdp">
+    Learn eBPF packet capture internals
+  </Card>
+  <Card title="Performance" icon="rocket" href="/operations/performance">
+    Optimize and benchmark components
+  </Card>
+</CardGroup>
